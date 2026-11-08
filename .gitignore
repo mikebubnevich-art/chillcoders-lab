@@ -1,0 +1,27 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# VS Code
+.vscode/
+
+# Local prototype / scratch files
+model.py
+
+# External / embedded repositories that should stay local
+agent-core/
+agent-memory/
+agent-security/
+agent-studio/
+jiuwenswarm/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temporary files
+*.log
+*.tmp

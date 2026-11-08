@@ -1,0 +1,7 @@
+{
+  "id": "task_001",
+  "description": "Return the answer to simple arithmetic.",
+  "reward": 10,
+  "estimated_cost": 5000,
+  "prompt": "Compute 2 + 2."
+}

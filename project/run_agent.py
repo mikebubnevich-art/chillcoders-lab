@@ -2,9 +2,12 @@
 """Entry point: python /app/run_agent.py --tasks-dir /data/tasks
 
 Phase 1 (0 tokens, parallel): template solvers + feasibility triage for ALL tasks.
-Phase 2 (LLM): remaining tasks ordered by the planner (P(success)*reward/E[tokens]).
+Phase 2 (LLM), two waves:
+  wave 1: planner-selected tasks, ordered by P(success)*reward/E[tokens];
+  wave 2: filler tasks, but only those that fit the ACTUAL budget left after wave 1.
 Env: OUT, TASKS, LLM_BASE_URL, LLM_API_KEY. Optional: BUDGET (default 100000), MODEL,
-WORKERS (<=5), TASK_CAP, DEADLINE_S, TRAJ, DISABLE_SOLVERS=1.
+MODEL_CODING (default qwen3.8-27b), WORKERS (<=5), TASK_CAP, DEADLINE_S, TRAJ,
+DISABLE_SOLVERS=1.
 """
 import argparse
 import json
@@ -17,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness import planner  # noqa: E402
-from harness.agent import solve_llm  # noqa: E402
+from harness.agent import fallback_model, model_for, out_mult, solve_llm, task_cap  # noqa: E402
 from harness.budget import Budget, TaskMeter  # noqa: E402
 from harness.llm_client import LLMClient  # noqa: E402
 from harness.storage import Results  # noqa: E402
@@ -30,7 +33,12 @@ def main():
     ap.add_argument("--tasks-dir", default=os.environ.get("TASKS", "/data/tasks"))
     ap.add_argument("--out", default=os.environ.get("OUT"))
     ap.add_argument("--budget", type=float, default=float(os.environ.get("BUDGET", 100000)))
-    ap.add_argument("--model", default=os.environ.get("MODEL", "qwen3.6-35b-a3b-noreason"))
+    ap.add_argument("--model", default=os.environ.get("MODEL", "qwen3.8-27b-noreason"))
+    ap.add_argument("--coding-model", default=os.environ.get("MODEL_CODING", "qwen3.8-27b"),
+                    help="optional stronger model for coding tasks only; empty = same as --model")
+    ap.add_argument("--coding-strategy", default=os.environ.get("CODING_STRATEGY", "fallback"),
+                    choices=("fallback", "always"),
+                    help="fallback: base first, coding model only on failure; always: coding model first")
     ap.add_argument("--workers", type=int, default=int(os.environ.get("WORKERS", 5)))
     ap.add_argument("--task-cap", type=float, default=float(os.environ.get("TASK_CAP", 1500)))
     ap.add_argument("--deadline", type=float, default=float(os.environ.get("DEADLINE_S", 3300)))
@@ -38,14 +46,20 @@ def main():
 
     t0 = time.time()
     budget = Budget(a.budget)
-    client = LLMClient(budget, traj_path=os.environ.get("TRAJ", "/tmp/trajectories.jsonl"))
+    client = LLMClient(budget, traj_path=os.environ.get("TRAJ", "/tmp/trajectories.jsonl"),
+                       deadline=t0 + a.deadline)
     results = Results(a.out)
     use_solvers = os.environ.get("DISABLE_SOLVERS") != "1"
     tasks = load_tasks(a.tasks_dir)
     workers = max(1, min(5, a.workers))
+    mult = out_mult(a.model)
+    coding_mult = out_mult(a.coding_model) if a.coding_model else mult
+
     stats = {"solved": 0, "solver": 0, "llm_solved": 0, "infeasible": 0, "failed": 0, "skipped": 0, "reward": 0.0}
     lock = threading.Lock()
-    print(f"[run] {len(tasks)} tasks, budget={a.budget:.0f}, model={a.model}", flush=True)
+    print(f"[run] {len(tasks)} tasks, budget={a.budget:.0f}, model={a.model}, "
+          f"coding_model={a.coding_model or '-'}, workers={workers}, "
+          f"out_mult={mult:g}/{coding_mult:g}", flush=True)
 
     def bump(**kw):
         with lock:
@@ -74,7 +88,10 @@ def main():
     todo += [(t, 0.5) for t, r in triaged if r is None]  # triage crashed: let the LLM try
 
     # ---- phase 2: planned LLM spending ----
-    plan = planner.rank(todo, budget.remaining())
+    plan = planner.rank(todo, budget.remaining(), out_mult=mult,
+                        out_mult_by_type={"coding": coding_mult, "code": coding_mult})
+    selected = [p for p in plan if p["selected"]]
+    filler = [p for p in plan if not p["selected"]]
     for p in plan:
         print(f"[plan] {p['task']['id']:<22} est={p['est']:6.0f} p={p['p']:.2f} ratio={p['ratio']:.4f} "
               f"{'*' if p['selected'] else ' '}", flush=True)
@@ -84,9 +101,20 @@ def main():
         if time.time() - t0 > a.deadline:
             bump(skipped=1)
             return
-        meter = TaskMeter(budget, a.task_cap)
+        t_task = time.time()
+        model = model_for(t, a.model, a.coding_model, a.coding_strategy)
+        meter = TaskMeter(budget, task_cap(t, a.task_cap, out_mult(model)))
         try:
-            ans, src = solve_llm(t, client, meter, a.model)
+            ans, src = solve_llm(t, client, meter, model)
+            retry = fallback_model(t, src, model, a.coding_model, a.coding_strategy)
+            if not ans and retry and time.time() - t0 <= a.deadline:
+                meter2 = TaskMeter(budget, task_cap(t, a.task_cap, out_mult(retry)))
+                ans2, src2 = solve_llm(t, client, meter2, retry)
+                meter.spent += meter2.spent
+                if ans2:
+                    ans, src = ans2, f"{src2}+fb"
+                else:
+                    src = f"fb-{src2}"
         except Exception as e:
             ans, src = None, f"error:{type(e).__name__}"
         if ans:
@@ -94,10 +122,31 @@ def main():
             bump(solved=1, llm_solved=1, reward=t["reward"])
         else:
             bump(failed=1)
-        print(f"[task] {t['id']:<22} {src:<9} cost={meter.spent:7.1f} {budget.snapshot()}", flush=True)
+        print(f"[task] {t['id']:<22} {src:<9} cost={meter.spent:7.1f} "
+              f"sec={time.time() - t_task:5.1f} {budget.snapshot()}", flush=True)
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(phase2, plan))
+    def run_wave(rows, name):
+        if not rows:
+            return
+        print(f"[wave] {name}: {len(rows)} tasks, remaining={budget.remaining():.0f}", flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(phase2, rows))
+
+    def admit(rows):
+        """Greedy admission against the ACTUAL remaining budget, not the prior plan."""
+        left, out = budget.remaining(), []
+        for p in rows:
+            if p["est"] <= left:
+                out.append(p)
+                left -= p["est"]
+        return out
+
+    # Wave 1 must not compete with unselected tasks for reservations.
+    run_wave(selected, "1/selected")
+    # Wave 2 is filler: it may use only what wave 1 did not spend.
+    if time.time() - t0 <= a.deadline:
+        run_wave(admit(filler), "2/filler")
+
     print("[done]", json.dumps({**stats, **budget.snapshot(), "sec": round(time.time() - t0, 1)}), flush=True)
 
 

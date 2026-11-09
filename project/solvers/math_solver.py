@@ -3,10 +3,16 @@ import math
 import re
 
 START = re.compile(r"starts? with (\d+)", re.I)
-SPLIT = re.compile(r"split equally into (\d+)[^.]*?keeps? one share[^.]*?\(rounded (down|up)\)", re.I)
+SPLIT = re.compile(r"(?:split|divid(?:e|es|ed)) equally into (\d+)[^.]*?keeps? (?:one|1) "
+                   r"(?:share|part|portion|warehouse)?[^.]*?\(rounded (down|up)\)", re.I)
 MULT = {"doubled": 2, "tripled": 3, "quadrupled": 4}
-ADD = r"(?:receives?|gets?|adds?|gains?|takes? in)"
-SUB = r"(?:ships?|sells?|loses?|removes?|uses?|donates?|discards?|sends? out|gives? away)"
+MULT_ANY = re.compile(r"\b(double|doubles|doubled|triple|triples|tripled|"
+                      r"quadruple|quadruples|quadrupled)\b", re.I)
+MULT_VAL = {v: k for word, k in (("double", 2), ("triple", 3), ("quadruple", 4))
+            for v in (word, word + "s", word + "d")}
+ADD = r"(?:receives?|gets?|adds?|gains?|takes? in|buys?|purchases?|restocks?)"
+SUB = (r"(?:ships?(?: out)?|sells?(?: off)?|loses?|removes?|uses?|donates?|discards?|"
+       r"throws? away|gives? away|sends? out)")
 V = rf"({ADD}|{SUB})"
 SUBJ = re.compile(r"^(?:then,?\s+|next,?\s+|after that,?\s+)?(?:it|the \w+(?: \w+)?)\s+", re.I)
 PER = re.compile(rf"{V} (\d+) \w+ per \w+ for (\d+) \w+")
@@ -40,6 +46,10 @@ def solve(instruction: str, task_dir: str):
         w = next((v for k, v in MULT.items() if k in s.lower()), None)
         if w and "merging" in s.lower():
             n *= w
+            continue
+        mm = MULT_ANY.search(s)
+        if mm and not re.search(r"\b(?:every|each|per)\b", s, re.I):
+            n *= MULT_VAL[mm.group(1).lower()]
             continue
         body = SUBJ.sub("", s.strip().rstrip(".").lower())
         m = PER.fullmatch(body)

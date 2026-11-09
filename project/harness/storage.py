@@ -30,8 +30,22 @@ class Results:
 
     def save(self, task, answer: str) -> None:
         ans = answer.strip()
-        with open(os.path.join(task["dir"], "answer.txt"), "w", encoding="utf-8") as f:
-            f.write(ans + "\n")
+        # The checker may read answer.txt in the working dir or in the task
+        # dir; write both when they differ (workspace layout).
+        targets = [os.path.join(task["dir"], "answer.txt")]
+        root = task.get("root")
+        if root and os.path.abspath(root) != os.path.abspath(task["dir"]):
+            targets.append(os.path.join(root, "answer.txt"))
+        saved, last_error = False, None
+        for path in targets:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(ans + "\n")
+                saved = True
+            except OSError as e:
+                last_error = e
+        if not saved and last_error is not None:
+            raise last_error
         with self._lock:
             self.data[task["id"]] = ans
             self._flush()

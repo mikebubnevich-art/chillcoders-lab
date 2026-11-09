@@ -2,6 +2,7 @@
 import csv
 import os
 import re
+import statistics
 
 from . import UNSOLVABLE
 
@@ -78,7 +79,52 @@ def solve(instruction: str, task_dir: str):
         return _fmt(sum(_num(x["units"]) * _num(x["price"]) for x in sel), decimals)
     if re.search(r"(how many|number of|count of)\s+(orders|rows|records|sales)", low):
         return str(len(sel))
-    head = re.search(r"(?:how many|total|sum of|average|mean|maximum|minimum|highest|lowest|largest|smallest)"
+    dm = re.search(r"(?:how many|number of|count of)\s+(?:unique|distinct)\s+([a-z_]+)", low)
+    if dm:
+        w = dm.group(1)
+        col = next((c for c in cols if c.lower() in (w, w.rstrip("s"))), None)
+        return None if col is None else str(len({x[col] for x in sel}))
+    pm = re.search(r"\b(?:percentage|percent)\s+of\s+(?:the\s+)?(?:orders|rows|records|sales)\b", low)
+    if pm:
+        return _fmt(100.0 * len(sel) / len(rows), decimals)
+    # "which product had the highest total units?", "which region sold the most orders?"
+    gm = re.search(r"(?:which|what)\s+([a-z_]+)\s+(?:had|has|have|sold|generated|recorded|showed)?\s*"
+                   r"(?:the\s+)?(highest|largest|most|lowest|smallest|least)\s+"
+                   r"(?:total\s+|average\s+|mean\s+)?([a-z_]+)", low)
+    if gm:
+        gword, direction, tword = gm.groups()
+        group_col = next((c for c in cols if c.lower() in (gword, gword.rstrip("s"))), None)
+        if group_col:
+            count_mode = tword in ("orders", "rows", "records")
+            target = next((c for c in numeric if c.lower() in (tword, tword.rstrip("s")) and c != "order_id"), None)
+            revenue_mode = tword in ("revenue", "sales") and "units" in numeric and "price" in numeric
+            if not (count_mode or target or revenue_mode):
+                return None
+            buckets = {}
+            for x in sel:
+                if count_mode:
+                    v = 1.0
+                elif revenue_mode:
+                    v = _num(x["units"]) * _num(x["price"])
+                else:
+                    v = _num(x[target])
+                if v is not None:
+                    buckets.setdefault(x[group_col], []).append(v)
+            if not buckets:
+                return None
+            if count_mode:
+                scored = {k: float(len(vs)) for k, vs in buckets.items()}
+            elif re.search(r"\b(?:average|mean)\b", low):
+                scored = {k: sum(vs) / len(vs) for k, vs in buckets.items()}
+            elif target and "price" in target.lower():
+                scored = {k: (max(vs) if direction in ("highest", "largest", "most") else min(vs))
+                          for k, vs in buckets.items()}
+            else:
+                scored = {k: sum(vs) for k, vs in buckets.items()}
+            best = max(scored.values()) if direction in ("highest", "largest", "most") else min(scored.values())
+            winners = [k for k, v in scored.items() if abs(v - best) < 1e-9]
+            return winners[0] if len(winners) == 1 else None
+    head = re.search(r"(?:how many|total|sum of|average|mean|median|maximum|minimum|highest|lowest|largest|smallest)"
                      r"\s+(?:of\s+)?(?:the\s+)?([a-z_]+)", low)
     target = None
     if head:
@@ -89,6 +135,8 @@ def solve(instruction: str, task_dir: str):
     vals = [_num(x[target]) for x in sel]
     if not vals:
         return None
+    if re.search(r"\bmedian\b", low):
+        return _fmt(statistics.median(vals), decimals)
     if re.search(r"\b(average|mean)\b", low):
         return _fmt(sum(vals) / len(vals), decimals)
     if re.search(r"\b(maximum|highest|largest|max)\b", low):

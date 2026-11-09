@@ -28,6 +28,30 @@ class Math(unittest.TestCase):
     def test_unknown_step_falls_back(self):
         self.assertIsNone(math_solver.solve(self.q(10, ["Then 5 boxes are lost."]), ""))
 
+    def test_buy_and_dispose_verbs(self):
+        s = ["Then it buys 40 boxes.", "Then it purchases 15 boxes.",
+             "Then it restocks 25 boxes.", "Then it sells off 30 boxes.",
+             "Then it throws away 10 boxes."]
+        self.assertEqual(math_solver.solve(self.q(100, s), ""), str(100 + 40 + 15 + 25 - 30 - 10))
+
+    def test_split_wording_variants(self):
+        for step, expected in [
+            ("Then the stock is divided equally into 3 warehouses and it keeps one portion (rounded down).", 10 // 3),
+            ("Then the stock is split equally into 4 warehouses and it keeps 1 share (rounded up).", -(-10 // 4)),
+            ("Then the stock is divided equally into 3 parts and it keeps one part (rounded down).", 10 // 3),
+        ]:
+            with self.subTest(step=step):
+                self.assertEqual(math_solver.solve(self.q(10, [step]), ""), str(expected))
+
+    def test_multiplier_without_merging(self):
+        for word, k in [("doubles", 2), ("triples", 3), ("quadruples", 4)]:
+            with self.subTest(word=word):
+                self.assertEqual(math_solver.solve(self.q(7, [f"Then the stock {word}."]), ""), str(7 * k))
+
+    def test_per_period_multiplier_is_not_a_chain_step(self):
+        s = ["Then the stock doubles every day for 3 days."]
+        self.assertIsNone(math_solver.solve(self.q(7, s), ""))
+
 
 class Data(unittest.TestCase):
     d = os.path.join(FIX, "data_analysis_0002")
@@ -53,6 +77,46 @@ class Data(unittest.TestCase):
     def test_unsure_float_returns_none(self):
         self.assertIsNone(self.s("What is the average price of product 'widget'?"))
 
+    def test_median(self):
+        df = self.df
+        self.assertEqual(self.s("What is the median price of product 'widget'?"),
+                         str(int(df[df["product"] == "widget"].price.median())))
+
+    def test_distinct_counts(self):
+        df = self.df
+        self.assertEqual(self.s("How many unique products were sold in region 'west'?"),
+                         str(df[df.region == "west"]["product"].nunique()))
+        self.assertEqual(self.s("How many distinct regions are there?"), str(df.region.nunique()))
+
+    def test_percentage_of_orders(self):
+        df = self.df
+        self.assertEqual(self.s("What percentage of orders were placed in region 'east'?"),
+                         str(round(100 * len(df[df.region == "east"]) / len(df))))
+
+    def test_groupby_top(self):
+        df = self.df
+        by_units = df.groupby("product").units.sum()
+        self.assertEqual(self.s("Which product had the highest total units?"), by_units.idxmax())
+        by_count = df.groupby("region").size()
+        self.assertEqual(self.s("Which region sold the most orders?"), by_count.idxmax())
+        by_avg = df.groupby("region").price.mean()
+        self.assertEqual(self.s("Which region had the lowest average price?"), by_avg.idxmin())
+
+    def test_groupby_unknown_measure_returns_none(self):
+        self.assertIsNone(self.s("Which product had the highest color?"))
+
+    def test_groupby_tie_returns_none(self):
+        d = tempfile.mkdtemp(prefix="data_tie_")
+        try:
+            with open(os.path.join(d, "t.csv"), "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["group", "value"])
+                w.writerows([["a", 1], ["b", 1], ["a", 2], ["b", 2]])
+            q = "The file t.csv has columns group,value (4 rows). Which group has the highest total value?"
+            self.assertIsNone(data_solver.solve(q, d))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 class Search(unittest.TestCase):
     d = os.path.join(FIX, "search_synth")
@@ -73,6 +137,51 @@ class Search(unittest.TestCase):
     def test_broken_chain_falls_back(self):
         # mentor has no card -> cannot continue the chain; never guess
         self.assertIsNone(self.s("In which city is the headquarters of the employer of the mentor of Alice Smith?"))
+
+
+class SearchSynonyms(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="kb_syn_")
+        kb = os.path.join(self.d, "kb")
+        os.makedirs(kb)
+        docs = {
+            "person_ada.md": "# Ada Lovelace\nBorn: 1815\nEmployer: Analytical Engine Ltd\n"
+                             "Spouse: William King\nCountry: UK\nMentor: Charles Babbage\n",
+            "company_analytical.md": "# Analytical Engine Ltd\nHeadquarters: London\nFounded: 1822\n"
+                                     "Founder: Charles Babbage\nCEO: Ada Lovelace\nParent: Babbage Holdings\n",
+            "company_babbage.md": "# Babbage Holdings\nHeadquarters: Cambridge\nCEO: Charles Babbage\n",
+            "book_notes.md": "# Notes on the Engine\nAuthor: Ada Lovelace\nDirector: Ada Lovelace\n",
+        }
+        for name, text in docs.items():
+            with open(os.path.join(kb, name), "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def s(self, q):
+        return search_solver.solve(q + " Work only inside the current directory.", self.d)
+
+    def test_where_located(self):
+        self.assertEqual(self.s("In which city is Ada Lovelace's employer located?"), "London")
+        self.assertEqual(self.s("Where is Analytical Engine Ltd headquartered?"), "London")
+
+    def test_works_at(self):
+        self.assertEqual(self.s("Which company does Ada Lovelace work at?"), "Analytical Engine Ltd")
+        self.assertEqual(self.s("Which country is Ada Lovelace a citizen of?"), "UK")
+
+    def test_founder_ceo_parent(self):
+        self.assertEqual(self.s("Who is the founder of Analytical Engine Ltd?"), "Charles Babbage")
+        self.assertEqual(self.s("Who is the CEO of Analytical Engine Ltd?"), "Ada Lovelace")
+        self.assertEqual(self.s("Who is the parent company of Analytical Engine Ltd?"), "Babbage Holdings")
+
+    def test_author_spouse_director(self):
+        self.assertEqual(self.s("Who wrote Notes on the Engine?"), "Ada Lovelace")
+        self.assertEqual(self.s("Who is Ada Lovelace married to?"), "William King")
+        self.assertEqual(self.s("Who directed Notes on the Engine?"), "Ada Lovelace")
+
+    def test_when_founded_is_not_confused_with_founder(self):
+        self.assertEqual(self.s("When was Analytical Engine Ltd founded?"), "1822")
 
 
 

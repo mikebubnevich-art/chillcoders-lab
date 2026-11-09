@@ -1,0 +1,503 @@
+# Harness v2: как поднять счёт при том же бюджете
+
+Дата: 2026-11-08. Основано на коде `project/`, двух PDF из корня репозитория и
+репозиториях org [openJiuwen-ai](https://github.com/openJiuwen-ai).
+
+## 0. Главный вывод
+
+Текущий harness — правильный скелет: **сначала 0-токенные решатели, потом один
+LLM-вызов, локальный запуск, максимум один retry**. Но он теряет баллы не там,
+где ожидается.
+
+Бюджет 100k при one-shot подходе — **не главное ограничение**. Один вызов на
+задачу стоит ~250–650 output-токенов; даже 80 задач это ~20–50k. Настоящие
+ограничения:
+
+1. **время** (1 час, 5 воркеров);
+2. **точность** (неверный ответ = потраченные токены и 0 баллов);
+3. **скрытые варианты шаблонов** (сольверы знают только примеры).
+
+Поэтому стратегия должна быть **breadth-first**: дешёвая попытка на каждой
+выполнимой задаче → локальная проверка → дорогие retry только там, где они
+окупаются. Не «решить 25–50 самых выгодных», а «дёшево попробовать все, затем
+углубляться в неудачи».
+
+## 0.1. Статус P0 (реализовано 2026-11-08)
+
+- `run_agent.py`: две волны. Волна 1 — только `selected`; волна 2 — `filler`,
+  допускается по **фактическому** остатку бюджета после волны 1.
+- `harness/agent.py`: coding принимается только при `answer.txt == DONE` и
+  зелёных тестах; тестовые файлы восстанавливаются из снимка перед проверкой.
+  `task_cap()` теперь гарантирует место на первый вызов + retry (coding 2400).
+- `harness/runner.py`: copy-sandbox в `/tmp`, rlimits CPU/AS/FSIZE/NPROC,
+  wall-timeout с kill process group, commit только `answer.txt` и изменённых
+  не-тестовых `.py`. Для очень больших задач — fallback in-place с теми же
+  лимитами и восстановлением тестов из памяти.
+- `harness/feasibility.py`: ссылки на выходные файлы (`write ... to
+  results.csv`) больше не считаются missing_file; missing input остаётся hard.
+- `harness/llm_client.py`: дедлайн-aware таймауты (HTTP timeout сжимается до
+  остатка `DEADLINE_S`, новые запросы не стартуют в последние 5 с).
+- Тесты: `39` unit (`unittest discover`) + `8` e2e, включая «DONE без фикса»,
+  подмену тестов, успешный LLM-fix, retry под полным 900-токенным usage,
+  sandbox-изоляцию, timeout и две волны.
+
+## 0.2. Статус P1-1 (DSL, реализовано 2026-11-09)
+
+- `harness/dsl.py`: LLM компилирует задачу в компактный JSON-план, локальный
+  интерпретатор считает точно. Math — `Fraction`, операции add/sub/mul/div с
+  `times`/`lots` и `round down|up|exact`; data — фильтры (eq/ne/gt/ge/lt/le/
+  between/in/not_in/contains/startswith) и агрегаты (sum/count/count_distinct/
+  avg/median/min/max/group_top); search — `{start, hops}` по графу KB.
+- План принимается только если он однозначен и вычислим: неизвестные ключи,
+  неизвестные колонки/поля, tie в group_top, нецелый ответ без hint о decimals,
+  неоднозначный синоним поля и non-terminating decimal отклоняются с короткой
+  ошибкой. Вторая попытка — полный скрипт (fallback), итого максимум 2 вызова.
+- `DISABLE_DSL=1` — принудительный script-only режим для A/B замера.
+- Search-солвер: синонимы `located in`, `works at`, `founder`, `ceo`,
+  `parent company`, `author`, `spouse`, `director`, `capital`, `country`;
+  закрывающая граница слова исправлена (alias `director` больше не матчит
+  `directory`).
+- Math-солвер: `buys/purchases/restocks`, `sells off/throws away/gives away`,
+  варианты формулировки split (`divided`, `part/portion`), умножение без
+  «merging» (`doubles/triples/quadruples`), защита от `doubles every day`.
+- Data-солвер: median, count distinct, percentage of orders, group_top
+  (highest/lowest total/average/count) с отказом при tie или неизвестной мере.
+- Тесты: `81` unit + `10` e2e, включая DSL-план, плохой план → script
+  fallback, все новые шаблоны солверов.
+- Синтетический набор `tools/gen_synthetic.py`: 100 задач (25 math, 25 data,
+  20 search, 15 coding, 15 infeasible), ground truth считается независимо.
+  `tools/bench_solvers.py` на seed 7: coverage 100% (85/85), wrong-answer
+  rate 0%, infeasible caught 100% (15/15), false skips 0, ~1.5 с.
+  Регрессионный тест — `tests/test_benchmark.py` (seed 11, порог coverage 95%).
+- Итог по тестам после P1-1: `86` unit + `10` e2e.
+
+## 0.3. Статус P1-2 (coding patch mode, реализовано 2026-11-09)
+
+- `harness/patch.py`: модель возвращает точные текстовые замены
+  `{"replacements":[{"file","old","new"}]}`, локальный код проверяет, что каждый
+  `old` встречается ровно один раз, применяет правки в sandbox, сам пишет
+  `DONE` и запускает исходные тесты.
+- Отклоняются: тестовые файлы, скрытые/сгенерированные пути, выход за пределы
+  task dir, не-`.py` файлы, неизвестные ключи, слишком большой план, `old`
+  с 0 или >1 вхождением. Запись начинается только после валидации всех правок;
+  при неудачных тестах файлы откатываются к оригиналам перед script-retry.
+- Промпт разрешает ответить полным скриптом, если заменами фикс не выражается;
+  такой ответ сразу исполняется (не тратит второй вызов). Итого максимум
+  2 вызова: patch → script с ошибкой плана как feedback.
+- `DISABLE_PATCH=1` — script-only режим для A/B.
+- Замер на фикстурах (mock): два coding-фикса по ~110–130 токенов против
+  полного скрипта; fallback на script проверен e2e.
+- Тесты: `107` unit + `13` e2e.
+
+## 0.4. Task layout: `workspace/` (критично, реализовано 2026-11-09)
+
+- Реальные сэмплы (`task-dir/task-dir/*`) держат файлы в `<task>/workspace/`,
+  а не в корне задачи. Фикстуры были сплющены, поэтому баг не проявлялся.
+- `harness/tasks.py` теперь выбирает `workspace/` рабочим каталогом, если он
+  есть; `root` хранится отдельно. Солверы, DSL, patch, sandbox и тесты работают
+  в рабочем каталоге.
+- `harness/storage.py` пишет `answer.txt` и в рабочий каталог, и в `<task>/`
+  (если они различаются) — проверяющий увидит ответ при любой трактовке
+  «каталога задачи». `task.json` всегда читается из `<task>/`.
+- Прогон на 8 реальных сэмплах: 8/8 решены фазой 1, reward 20/20, 0 токенов,
+  ~1 с. Регрессия — `tests/test_layout.py` (оба layout'а).
+
+## 0.5. openJiuwen как тонкий транспорт (реализовано 2026-11-09)
+
+- `harness/oj_transport.py`: openJiuwen 0.1.19 `OpenAIModelClient` — предпочтительный
+  HTTP-транспорт; бюджет, дедлайн, ретраи и промпты остаются в нашем коде.
+  Раннер, агенты, память и context engine фреймворка в hot path не попадают.
+- Логи openJiuwen направляются в `/tmp/jiuwen_logs` (контейнер read-only),
+  клиент создаётся заново на вызов (`use_shared_llm_http_client=False`) —
+  безопасно для 5 рабочих потоков с разными event loop.
+- `usage_metadata` маппится в OpenAI-словарь; при отсутствии usage работает
+  консервативная оценка.
+- Любая ошибка/отсутствие openJiuwen → fallback на raw `urllib` в рамках той же
+  резервации бюджета, адаптер отключается до конца прогона. `USE_OJIWEN=0` —
+  принудительный stdlib-режим для A/B.
+- Проверено: 3 параллельных вызова через openJiuwen в полном venv (mock proxy),
+  fallback в venv без `pymilvus`; e2e `test_openjiuwen_transport_is_used`
+  запускается только при полном runtime. Тесты: `122` unit + `15` e2e (1 skip).
+
+## 0.6. Матрица 4 моделей (реализовано 2026-11-09)
+
+- `tools/model_matrix.py` гоняет `qwen3.8-27b`, `qwen3.8-27b-noreason`,
+  `qwen3.6-35b-a3b`, `qwen3.6-35b-a3b-noreason` на одном наборе задач.
+- Модели идут последовательно, каждая получает ≤5 воркеров — лимит 5 сессий
+  не нарушается; у каждой модели своя копия задач, `answer.txt` не протекает.
+- По умолчанию солверы выключены (`DISABLE_SOLVERS=1`): синтетика решается
+  zero-token солверами, и все модели дали бы 0 токенов. `--solvers` — замер
+  всего харнесса.
+- Метрики: ok/wrong/unknown по `task.json.expected` (только dev-инструмент),
+  ложные ответы на infeasible, reward только за правильные ответы, токены по
+  формуле соревнования, cost/ok, reward/1k, p50/p95 на вызов LLM.
+- Ключи: `project/.env.local` (gitignored, `LLM_BASE_URL`/`LLM_API_KEY`),
+  подхватывается автоматически; переменные окружения имеют приоритет.
+  Проверено на mock-прокси: fixtures 6/6 ok, подмена expected → wrong=1,
+  synth100 `--limit 4` → 3 ответа, 0/15 ложных на infeasible.
+
+### 0.6.1. Что показал первый полный прогон (2026-11-09)
+
+- Прокси держит **3 одновременных запроса**, а не 5: первый же батч из 5
+  воркеров получил 429, и адаптер openJiuwen отключался навсегда — все четыре
+  модели фактически шли через urllib. Исправлено: адаптивный лимит
+  `LLM_CONCURRENCY` (старт 5, −1 на каждый 429, floor 1), 429/таймаут/5xx
+  больше не отключают openJiuwen (только 3 подряд транзиентных отказа), а
+  `Retry-After` учитывается.
+- Reasoning-модели упирались в `max_tokens`: у `qwen3.6-35b-a3b` **100%**
+  вызовов завершались на лимите с пустым content (0 ответов за 19.3k токенов).
+  Исправлено: `REASON_MULT` (по умолчанию 4x) для моделей без `-noreason`,
+  минимум 1200 токенов на DSL-план; `task_cap` и оценка планировщика
+  масштабируются так же. После фикса та же модель: fixtures 6/6, пилот 7/8.
+- `DISABLE_SOLVERS=1` отключал и детектор UNSOLVABLE, поэтому 3 из 15
+  infeasible (search по несуществующей сущности) доходили до LLM и получали
+  выдуманный ответ. Теперь солверы всегда запускаются для проверки
+  разрешимости (в dry-run: code_solver не пишет исправление в task dir),
+  флаг лишь запрещает принимать их ответы.
+- Пилот 23 задачи (8 feasible + 15 infeasible, без солверов):
+  `qwen3.8-27b-noreason` 8/8 за 1364 токена, `qwen3.8-27b` 8/8 за 5546,
+  `qwen3.6-35b-a3b` 7/8 за 12168, `qwen3.6-35b-a3b-noreason` 6/8 за 1872;
+  ложных ответов на infeasible 0/15 у всех. Выбор: `qwen3.8-27b-noreason`.
+- Полный synth100 с солверами: 85/85 feasible, 15/15 infeasible, 0 токенов.
+
+### 0.6.2. Финальная матрица: 100 задач, бюджет 100k, без солверов (2026-11-09)
+
+| модель | ok | wrong | FP | токены | cost/ok | reward/1k | wall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `qwen3.8-27b` | 80 | 4 | 0/15 | 55878 | 699 | 1.43 | 432s |
+| `qwen3.8-27b-noreason` | 81 | 2 | 0/15 | 15682 | 194 | 5.17 | 86s |
+| `qwen3.6-35b-a3b` | 79 | 3 | 0/15 | 64772 | 820 | 1.22 | 181s |
+| `qwen3.6-35b-a3b-noreason` | 73 | 3 | 0/15 | 12061 | 165 | 6.05 | 54s |
+
+- Все 400 вызовов, кроме одного, прошли через openJiuwen; 429 больше не
+  отключает адаптер. Лимит в полёте — 3.
+- Reasoning-варианты дают +2…+6 задач к покрытию, но стоят в 3.5–5 раз
+  дороже и в 2–5 раз медленнее. Для бюджета 100k и дедлайна 1 час это плохой
+  размен: `qwen3.8-27b-noreason` — основная модель.
+- Coding — единственное место, где reasoning реально выигрывает:
+  15/15 против 13/15, но за 36.7k против 9.6k токенов.
+- После матрицы добавлены `percent` (доля отфильтрованных строк) и
+  `sum_product` (revenue = sum(units*price)) в DSL. Точечная перепроверка:
+  обе percent-задачи и revenue-задачи решаются всеми моделями через DSL;
+  скорректированные итоги: 83 / 83 / 81 / 75 из 85.
+
+### 0.6.3. Гибридная конфигурация (принята как основная)
+
+Матрица показала, что reasoning-модель выигрывает только на coding. Регламент
+разрешает переключать модель на любом вызове, поэтому в `run_agent.py` добавлен
+`--coding-model` / `MODEL_CODING` и стратегия `CODING_STRATEGY`:
+
+- `fallback` (по умолчанию): coding решает базовая `noreason`-модель; если попытка
+  провалилась (не прошли тесты), задача целиком повторяется сильной моделью.
+- `always`: все coding-задачи сразу идут в сильную модель.
+
+Планировщик оценивает coding по множителю сильной модели (`out_mult_by_type`);
+`task_cap` для каждой задачи считается по её модели.
+
+- Полный synth100, `fallback` (дефолт): **85/85, wrong 0, FP 0/15,
+  12 646 токенов, 165 s**. Разбивка: coding 15/15 за 6.6k, data 25/25 за 2.2k,
+  math 25/25 за 3.0k, search 20/20 за 0.8k. В этом прогоне базовая модель
+  закрыла все coding-задачи, поэтому fallback не понадобился; переключение
+  проверяется отдельным e2e-тестом.
+- Полный synth100, `always`: **85/85, wrong 0, FP 0/15, 39 549 токенов,
+  190 s**, coding 33.5k. Разница — цена немедленного перехода на reasoning.
+- Отдельный прогон 15 coding-задач: **15/15, 5 610 токенов, 27 s**;
+  fallback снова не понадобился — базовая модель закрыла все задачи.
+- Без гибрида (одна `qwen3.8-27b-noreason`) было 81/85: две coding-задачи
+  падали; fallback как раз страхует такие случаи.
+- Дефолты: `MODEL=qwen3.8-27b-noreason`, `MODEL_CODING=qwen3.8-27b`,
+  `CODING_STRATEGY=fallback`; `MODEL_CODING=` (пусто) отключает переключение,
+  `CODING_STRATEGY=always` возвращает прежнюю схему.
+
+## 1. Исходный аудит на 2026-11-08 (исправлено в 0.1–0.6)
+
+Ниже — состояние кода до работ; разделы оставлены как обоснование решений.
+
+### 1.1. Планировщик выбирает задачи, а исполнитель запускает все
+
+`project/harness/planner.py:62-63` возвращает `selected + unselected`, а
+`project/run_agent.py:100` делает `ex.map(phase2, plan)` по всему списку.
+
+Факт из `tests/e2e.py::test_tiny_budget_never_overshoots`: при бюджете 900
+выбраны только `math_0000`/`math_0004`, но параллельно запускаются
+`coding_0007`, `coding_variant2`, `search_synth`, `data_analysis_0002`.
+`data_analysis_0002` сжигает 178.8 токенов и падает, coding-задачи получают
+`BudgetExceeded` на reserve 652.4.
+
+Что делать: **две волны**.
+
+- Волна 1 — только `selected`, в порядке `value/token`.
+- Волна 2 — `unselected` как filler, но только если после волны 1 реально
+  осталось время и бюджет; admission по фактическому остатку, а не по
+  априорному плану.
+- Причина: невыбранные задачи могут быть полезны как filler, но не должны
+  конкурировать с выбранными за reserve.
+
+### 1.2. Coding-задача считается решённой по непустому `answer.txt`
+
+`project/harness/agent.py:63-65`: `if rc == 0 and ans: return ans`.
+Для coding проверка — скрытые тесты, а не текст в `answer.txt`. Модель может
+написать `DONE`, не исправив `mylib.py`, и harness посчитает задачу решённой.
+
+Что делать: для `task_type in ("coding", "code")`:
+
+1. вытащить команду тестов из инструкции (`python3 test_mylib.py`);
+2. после скрипта запустить её в task dir;
+3. принять ответ только при `returncode == 0`;
+4. проверить, что `answer.txt` == `DONE`;
+5. проверить hash тестового файла до/после — тесты менять нельзя;
+6. при провале — retry с traceback, иначе `failed`, а не `solved`.
+
+### 1.3. `TASK_CAP=1500` не вмещает coding retry
+
+`project/run_agent.py:35` задаёт cap 1500. `project/harness/agent.py:41` для
+coding ставит `max_tokens=900`. Первый вызов резервирует ~900 + input/10,
+после него на retry остаётся меньше 900 → `BudgetExceeded`, retry невозможен.
+
+Что делать: один из вариантов:
+
+- coding patch/JSON-замена функций с `max_tokens=500–600`, cap 1600–1800;
+- `TASK_CAP = max(1500, 2.2 * est_cost)` для типа;
+- отдельный retry-резерв на задачу (например, 40% cap).
+
+### 1.4. LLM-скрипт выполняется в боевом task dir без ограничений
+
+`project/harness/runner.py:8-17`: скрипт получает cwd задачи, может удалить
+данные, переписать тесты, съесть CPU/RAM. `--read-only` контейнера не спасает:
+`/data/tasks` смонтирован `rw`.
+
+Что делать: copy-sandbox.
+
+- копировать task dir в `/tmp/work/<task>`;
+- запускать скрипт там, с `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_FSIZE`,
+  `RLIMIT_NPROC`, timeout 60s;
+- копировать обратно только разрешённые файлы: `answer.txt`, а для coding —
+  целевой модуль (не тесты);
+- сравнивать hash тестов до/после.
+
+### 1.5. Нет локальной проверки для math/data/search
+
+Сейчас LLM пишет скрипт, скрипт пишет ответ, harness верит. Ошибка в парсинге
+или арифметике стоит полного вызова и даёт 0 баллов.
+
+Что делать: **LLM как компилятор в компактный DSL, а не как исполнитель**.
+
+| Тип | Что просит LLM | Что делает локальный код | max_tokens |
+|---|---|---|---|
+| math | JSON-план операций | интерпретатор на `Fraction`, проверка округления | 60–100 |
+| data | JSON-фильтры + агрегат | pandas/sqlite, независимый пересчёт | 80–120 |
+| search | JSON `{start, hops, target}` | обход графа KB, проверка уникальности | 60–100 |
+| coding | unified diff или замена функций | `patch`/AST-замена + тесты | 400–600 |
+
+Fallback на полный скрипт — только если DSL не распознан/не сошёлся.
+Экономия output-токенов: примерно 3–5× на math/data/search и 1.5–2× на coding.
+
+### 1.6. Статический план без обратной связи
+
+`planner.rank` считает один раз по priors, `p_success` — константы по типу.
+После каждой задачи не пересчитывается ни стоимость, ни вероятность.
+
+Что делать: очередь + перепланирование после каждого исхода.
+
+- prior по типу/модели/режиму промпта;
+- online Beta- posterior для `P(success)`, EMA для стоимости;
+- стоимость для admission — квантиль (p80), а не среднее;
+- после успеха/провала — обновить и пересортировать очередь;
+- retry только если `P(success | failed_once) * reward / cost` выше порога.
+
+## 2. Что говорят PDF и что из этого уже сделано
+
+| Рекомендация PDF | Сейчас | Действие |
+|---|---|---|
+| Оценка расхода/выполнимости за 0 токенов | эвристики + solvers | добавить калибровку и классификатор |
+| `noreason` по умолчанию | да | сохранить, reason только точечно |
+| Один вызов + максимум один retry | да | починить cap и добавить verifier |
+| Замерить «пустой» вызов | инструмент есть, не прогнан | прогнать 4 модели |
+| Кодинг: не весь файл, а релевантные функции через `ast` | нет, первый 3000 символов | AST-slice + BM25 по именам тестов |
+| Data: схема + 3–5 строк, считает локальный код | да | расширить агрегаты/фильтры |
+| Math: короткий вывод или код | частично | DSL-план |
+| Search: grep/BM25 локально | частично | BM25 + обход графа |
+| `P*reward/E`, 85%, replan | статически | динамическая очередь |
+| Лимит на задачу 1.5–2× оценки | 1500 фикс | типовой cap |
+| Выбор модели по «баллы на 1000 токенов» | не измерялось | матрица моделей |
+| Синтетический тренировочный набор | только infeasible | генератор feasible + infeasible |
+| 15–25% невыполнимых | эвристики | cost-sensitive классификатор |
+
+Важное уточнение к PDF: при one-shot вызове бюджет 100k не заставляет
+отбирать 25–50 задач. Ошибочно жёстко отсекать выполнимые задачи: неверный
+skip стоит дороже, чем дешёвая попытка. Жёстко пропускать только
+**достоверно** невыполнимое (нет файла/каталога, нужен интернет, пустая
+инструкция). Остальное — soft-priority, не hard-skip.
+
+## 3. Что взять из openJiuwen-ai
+
+### 3.1. `agent-core` — транспорт и учёт токенов
+
+- `openjiuwen.core.foundation.llm.Model` / `OpenAIModelClient` — OpenAI-совместимый
+  клиент с `api_base`, `max_tokens`, `temperature`, `reasoning_effort`,
+  `extra_body`.
+- `UsageMetadata` содержит `input_tokens`, `output_tokens`, `reasoning_tokens`,
+  `cache_*` — ровно то, что нужно для формулы
+  `output + reasoning(если не включён в output) + input/10`.
+- `TiktokenCounter` / `TokenizerSelector` — оценка prompt-токенов; для Qwen
+  это не точный токенизатор, но лучше `len/3`. Фактический usage всё равно
+  берётся из ответа прокси.
+- `harness_protocol` — схема событий/usage (`ModelRequestEvent`, `TurnResult`);
+  можно использовать как формат `run_report.json`, не тащить рантайм.
+- `harness/security` — идеи file guard / shell AST / tiered policy для
+  sandbox; код тяжеловат, проще свои rlimits + whitelist copy-back.
+- `auto_harness` — идеи `SessionBudgetController` и fix-loop; в 0.1.19 модуль
+  может быть пустым, поэтому только как референс.
+
+**Подводные камни интеграции** (проверено на 0.1.19):
+
+- `openjiuwen` тянет ~87 зависимостей; импорт `core.foundation.llm` цепляет
+  context engine, `pymilvus` и т.д. Ставить только полный pinned-пакет, не
+  `--no-deps`.
+- перед импортом нужен `configure_log_config(...)`, иначе `LogConfig not available`.
+- дефолтный лог-конфиг пишет в `./logs/...`; в контейнере `/app` read-only →
+  нужен свой конфиг только со stdout (или cwd `/tmp`).
+- `Model.invoke` — async. Не делать `asyncio.run` на каждый вызов: общий
+  HTTP-клиент привязан к loop. Лучше один фоновый loop-поток +
+  `run_coroutine_threadsafe`, либо перевести оркестратор на async.
+- держать raw `urllib`-клиент как fallback: если импорт/транспорт падает,
+  harness не должен умирать.
+
+Вывод: интеграция оправдана для соответствия «на базе openJiuwen» и
+стандартного usage, но её нужно изолировать в одном адаптере и замерить
+время импорта, размер образа и сборку.
+
+### 3.2. `deepsearch` — локальный поиск и контекст
+
+- dual-sparse BM25 / гибридный retrieval → маленький pure-Python BM25 для
+  `kb/*.md` и для выбора релевантных функций/тестов в coding.
+- syntax-aware chunking → AST-разбиение модуля на функции; в промпт идут
+  только функции, которых касаются падающие тесты.
+- dual-model collaboration для контроля стоимости → cheap model извлекает
+  план/сущности, stronger model — только на escalation.
+
+### 3.3. `iCode` — траектории и diff/rollback
+
+- per-turn token/time breakdown → `run_report.json` и `trajectory.jsonl` с
+  разбивкой model / tools / waiting / tokens.
+- diff/rollback → coding-режим «патч + проверка тестов + откат при провале»
+  вместо свободного скрипта, который может переписать всё.
+- iCode требует Python 3.14, а openjiuwen — `<3.14`; брать идеи, не код.
+
+### 3.4. `agent-security` — sandbox
+
+- JiuwenBox: слоистая изоляция tool calls/code execution. Для нас достаточно
+  copy-sandbox + rlimits + whitelist, без отдельного сервиса.
+
+### 3.5. Что не тащить
+
+`agent-studio`, `agent-runtime`, `agent-dx`, `agent-protocol`,
+`jiuwenswarm`, `agent-memory` — лишний вес, latency и сеть. Для 100
+независимых задач на 1 час долговременная память и multi-agent не нужны.
+
+## 4. Целевая архитектура
+
+```
+tasks
+  │
+  ├─ triage (0 токенов): template solvers → feasibility p
+  │
+  ├─ queue: value/token, время, p(feasible), p(success)
+  │
+  ├─ scheduler (5 воркеров, budget/time admission)
+  │     │
+  │     ├─ L0: solver (0 токенов)
+  │     ├─ L1: компактный DSL-план (60–120 output)
+  │     ├─ L2: скрипт/патч (400–900)
+  │     └─ L3: reason-модель (только high reward, после L1/L2)
+  │
+  ├─ local executor + verifier (0 токенов)
+  │     ├─ math: Fraction-пересчёт
+  │     ├─ data: sqlite/pandas-пересчёт
+  │     ├─ search: обход графа + уникальность
+  │     └─ coding: тесты + hash тестов
+  │
+  └─ store: answer.txt + OUT/solutions.json после каждого решения
+```
+
+Ключевой принцип: **LLM не исполняет, а компилирует задачу в компактный
+план/патч; исполняет и проверяет локальный детерминированный код.**
+
+## 5. Конкретные изменения по файлам
+
+| Файл | Изменение |
+|---|---|
+| `project/run_agent.py` | две волны; выполнять только `selected`; dynamic queue; deadline per task; `run_report.json` |
+| `project/harness/planner.py` | калибруемые `est_cost`/`p_success`; квантиль стоимости; обновление posterior; учёт времени |
+| `project/harness/agent.py` | type-specific prompts; DSL-режимы; coding verifier; patch mode; retry с уменьшенным `max_tokens` |
+| `project/harness/runner.py` | copy-sandbox; rlimits; timeout; hash тестов; stdout fallback |
+| `project/harness/llm_client.py` | openjiuwen-адаптер + raw fallback; обработка 400/413; reasoning params; deadline-aware timeout |
+| `project/harness/feasibility.py` | hard только для достоверных случаев; soft p для планировщика |
+| `project/harness/context.py` | AST-slice для .py; BM25-выбор релевантных файлов; head+tail для больших |
+| `project/solvers/code_solver.py` | транзитивные callees; больше мутаций; time cap; финальный прогон тестов в task dir |
+| `project/solvers/data_solver.py` | groupby/median/count distinct/join/date/percent; синонимы колонок |
+| `project/solvers/search_solver.py` | BM25/алиасы/обратные связи/несколько hop; уникальность |
+| `project/solvers/math_solver.py` | проценты/дроби/средние/остатки; Fraction-проверка |
+| `project/Dockerfile` | `uv pip install --system`; pinned; проверка размера; non-obvious log config |
+| `project/tests/` | тесты на unselected, bad coding answer, tamper, retry cap, deadline |
+| `benchmarks/` | синтетический генератор 100 задач + матрица моделей + replay |
+| `docs/research/` | PDF → markdown, чтобы агенты и memory искали текст, а не бинарь |
+
+## 6. Дорожная карта
+
+### P0 — полдня, без новых зависимостей
+
+1. Две волны / только selected.
+2. Coding verifier (тесты + `DONE` + hash тестов).
+3. Починить `TASK_CAP` под retry.
+4. Copy-sandbox + rlimits.
+5. Запретить hard-skip сомнительных задач.
+6. Тесты на всё выше.
+
+Ожидаемый эффект: перестаём терять уже заработанные баллы и не сжигаем
+бюджет на невыбранных/неверных задачах.
+
+### P1 — 2–3 дня
+
+1. DSL-режимы math/data/search + локальные verifier'ы. — готово (0.2)
+2. Coding patch mode (diff/замена функций) + откат. — готово (0.3)
+3. AST-slice контекста + BM25.
+4. Динамическая очередь и posterior-обновления.
+5. Синтетический набор 100 задач (feasible + infeasible). — готово (0.2)
+6. Матрица 4 моделей: success, cost/solve, reward/1k, latency. — готово (0.6);
+   рабочая конфигурация — гибрид (0.6.3).
+7. openJiuwen как тонкий транспорт с fallback. — готово (0.5)
+
+### P2 — до финального прогона
+
+1. Калибровка Ridge/GBM (offline, коэффициенты в pure Python).
+2. Cost-sensitive классификатор невыполнимых.
+3. openjiuwen-адаптер (или документированный hybrid) + замер импорта. — готово (0.5, 0.6)
+4. Docker/uv/размер/время сборки; CI. — Docker локально недоступен
+5. README с фактическими числами и траекториями. — готово (0.6)
+6. PDF → markdown в `docs/research/`.
+
+## 7. Метрики приёмки
+
+- `tests/e2e.py` + новые тесты зелёные.
+- Tiny budget: ни одна `unselected` задача не стартует в волне 1; нет
+  overshoot.
+- Bad coding answer (DONE без фикса) не сохраняется как solved.
+- Подмена тестов отклоняется.
+- Coding retry укладывается в cap.
+- Синтетика 100 задач: 0-токенное покрытие ≥ 70%; wrong-answer rate < 5%;
+  cost/solve и reward/1k измерены по каждой модели.
+- Docker: сборка < 1000s, образ < 4GB, запуск с read-only `/app` и `HOME=/tmp`.
+
+## 8. Чего не делать
+
+- Не добавлять ReAct-циклы, multi-agent, vector DB, long-term memory,
+  framework tools: они добавляют входные токены и шаги, а бюджет и время
+  конечны.
+- Не давать LLM считать арифметику или проверять тесты — для этого есть
+  локальный код.
+- Не запускать все задачи параллельно «как получится»: нужен admission.
+- Не делать жёсткий skip выполнимой задачи из-за эвристики.
+- Не включать reasoning по умолчанию: 2–5k токенов на задачу съедят бюджет.
+- Не тащить весь openJiuwen runtime в hot path: только тонкий транспорт и
+  usage, с fallback.

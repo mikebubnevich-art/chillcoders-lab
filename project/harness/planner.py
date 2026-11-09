@@ -37,9 +37,9 @@ def features(task: dict) -> dict:
     }
 
 
-def est_cost(f: dict) -> float:
+def est_cost(f: dict, out_mult: float = 1.0) -> float:
     in_tok = SYSTEM_TOKENS + (f["instr_chars"] + f["ctx_chars"]) / 3.0
-    out = PRIOR_OUT.get(f["type"], 300)
+    out = PRIOR_OUT.get(f["type"], 300) * max(1.0, float(out_mult))
     return (in_tok / 10.0 + out) * RETRY_FACTOR
 
 
@@ -47,12 +47,14 @@ def p_success(f: dict, p_feasible: float = 1.0) -> float:
     return PRIOR_P.get(f["type"], 0.4) * p_feasible
 
 
-def rank(items, budget_left: float, reserve: float = 0.15):
+def rank(items, budget_left: float, reserve: float = 0.15, out_mult: float = 1.0,
+         out_mult_by_type=None):
     """items: list of (task, p_feasible). Returns plan rows in execution order."""
+    by_type = out_mult_by_type or {}
     rows = []
     for task, pf in items:
         f = features(task)
-        est, p = est_cost(f), p_success(f, pf)
+        est, p = est_cost(f, by_type.get(f["type"], out_mult)), p_success(f, pf)
         rows.append({"task": task, "est": est, "p": p, "ratio": p * task["reward"] / est})
     rows.sort(key=lambda r: r["ratio"], reverse=True)
     cap, cum = budget_left * (1 - reserve), 0.0

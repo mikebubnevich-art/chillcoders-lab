@@ -15,12 +15,14 @@ class Triage:
 
 
 def triage(task: dict, use_solvers: bool = True) -> Triage:
-    if use_solvers:
-        ans = try_solve(task)
-        if ans == UNSOLVABLE:
-            return Triage("infeasible", reasons=["solver:unsolvable"])
-        if ans:
-            return Triage("solved", answer=ans)
+    # Solvers always run: `DISABLE_SOLVERS=1` only stops us from ACCEPTING their
+    # answers (used to measure the model itself). UNSOLVABLE detection must stay
+    # on, otherwise unanswerable tasks reach the LLM and get hallucinated.
+    ans = try_solve(task, dry_run=not use_solvers)
+    if ans == UNSOLVABLE:
+        return Triage("infeasible", reasons=["solver:unsolvable"])
+    if use_solvers and ans:
+        return Triage("solved", answer=ans)
     fz = feasibility.check(task)
     if fz.hard:
         return Triage("infeasible", p_feasible=0.0, reasons=fz.reasons)

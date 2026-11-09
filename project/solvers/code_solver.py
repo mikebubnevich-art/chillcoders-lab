@@ -187,7 +187,7 @@ def _noneq(src):
     return [n for n in REF if n in ns and not _equivalent(src, [n])]
 
 
-def solve(instruction: str, task_dir: str):
+def solve(instruction: str, task_dir: str, dry_run: bool = False):
     tm = re.search(r"python3?\s+([\w./-]+\.py)", instruction)
     mm = re.search(r"(?:bugs in|fix)\s+`?([\w./-]+\.py)", instruction)
     if not tm or not mm:
@@ -226,7 +226,7 @@ def solve(instruction: str, task_dir: str):
         open(mod_path, "w", encoding="utf-8").write(src)
         if nfail != 0:
             return None  # could not reach all-green: LLM fallback
-        if src != orig:
+        if src != orig and not dry_run:
             shutil.copy(mod_path, os.path.join(task_dir, mod_file))
         return "DONE"
     finally:

@@ -12,11 +12,20 @@ import re
 from . import UNSOLVABLE
 
 SYN = {
-    "headquarters": ["headquarters", "headquartered", "hq", "based", "city"],
-    "born": ["born", "birth"],
-    "founded": ["founded", "established", "foundation"],
-    "employer": ["employer", "works for", "work for", "employed"],
-    "mentor": ["mentor"],
+    "headquarters": ["headquarters", "headquartered", "head office", "hq", "based in", "based", "city"],
+    "location": ["location", "located in", "situated in", "based in"],
+    "born": ["born", "birth", "birthplace", "date of birth"],
+    "founded": ["founded", "establishment", "established", "foundation year"],
+    "founder": ["founder", "founders", "co-founder", "founded by", "who founded", "started by"],
+    "employer": ["employer", "works for", "work for", "works at", "work at", "worked for", "employed by"],
+    "mentor": ["mentor", "mentored"],
+    "ceo": ["ceo", "chief executive", "chief executive officer", "led by", "run by"],
+    "author": ["author", "written by", "wrote", "writer"],
+    "spouse": ["spouse", "husband", "wife", "married to"],
+    "parent": ["parent", "parent company"],
+    "director": ["director", "directed", "directed by"],
+    "capital": ["capital", "capital city"],
+    "country": ["country", "nationality", "citizen of"],
 }
 
 
@@ -65,7 +74,7 @@ def solve(instruction: str, task_dir: str):
             return UNSOLVABLE
         return None
     keys = _field_keys(ents)
-    mentioned = [k for k in keys if any(re.search(rf"\b{re.escape(s)}", low) for s in SYN.get(k, [k]))]
+    mentioned = [k for k in keys if any(re.search(rf"\b{re.escape(s)}\b", low) for s in SYN.get(k, [k]))]
     # 'city' only matters together with headquarters; drop fields that are just the entity's own words
     link = [k for k in mentioned if any(v in ents for e in ents.values() for kk, v in e.items() if kk == k)]
     terminal = [k for k in mentioned if k not in link]

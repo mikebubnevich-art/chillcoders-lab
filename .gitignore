@@ -25,3 +25,8 @@ Thumbs.db
 # Logs / temporary files
 *.log
 *.tmp
+
+# Local secrets: never commit proxy keys
+.env
+.env.*
+!.env.example

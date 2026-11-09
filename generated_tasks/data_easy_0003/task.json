@@ -1,0 +1,8 @@
+{
+  "task_id": "data_easy_0003",
+  "task_type": "data_analysis",
+  "instruction": "The file transactions.csv contains sales transactions. Find the total number of units of pen sold in quarter 2 (sum units, not revenue). Use python3 to calculate it. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
+  "reward": 2,
+  "expected": "50",
+  "check": "exact_int"
+}

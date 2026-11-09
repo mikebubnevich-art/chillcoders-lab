@@ -1,0 +1,8 @@
+{
+  "task_id": "search_easy_0005",
+  "task_type": "search",
+  "instruction": "The directory kb/ contains Markdown notes. In which year was Jonas Reed born? Search the files using grep or cat. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
+  "reward": 1,
+  "expected": "1987",
+  "check": "exact_str"
+}

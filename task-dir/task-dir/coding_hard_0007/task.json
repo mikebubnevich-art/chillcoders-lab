@@ -1,0 +1,8 @@
+{
+  "task_id": "coding_hard_0007",
+  "task_type": "coding",
+  "instruction": "Run `python3 -m unittest test_mylib.py`. The library has multiple defects. Correct mylib.py only; do not change tests. When every test passes, write exactly PASS to answer.txt. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
+  "reward": 5,
+  "expected": "PASS",
+  "check": "exact_str"
+}

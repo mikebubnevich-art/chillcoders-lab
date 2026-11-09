@@ -1,10 +1,11 @@
 """Features, a-priori cost model and greedy knapsack ordering for LLM-path tasks.
 
 Tasks solved by template solvers cost 0 and never reach the planner. The priors below
-are placeholders calibrated later from real trajectories (priority 2/3); the interface
+are placeholders calibrated later from real trajectories; the interface
 (features -> est_cost / p_success) is what the trained Ridge/GBM will plug into.
 value = P(success) * reward / E[tokens]; select greedily until (1-reserve) of the budget.
 """
+import json
 import os
 import re
 
@@ -14,6 +15,74 @@ PRIOR_OUT = {"coding": 450, "data_analysis": 250, "math": 150, "search": 250}
 PRIOR_P = {"coding": 0.55, "data_analysis": 0.7, "math": 0.8, "search": 0.7}
 SYSTEM_TOKENS = 70  # our own tiny system prompt
 RETRY_FACTOR = 1.3  # expected extra cost of the (at most one) retry
+
+
+def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
+    """Load historical JSONL telemetry and aggregate by task type.
+
+    Expected record shape: {"type": "math", "cost": 120.0, "success": true}.
+    Records with missing or malformed values are ignored.
+    """
+    stats = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                typ = str(rec.get("type") or "").strip()
+                if not typ:
+                    continue
+                cost = rec.get("cost")
+                try:
+                    cost_value = float(cost)
+                except (TypeError, ValueError):
+                    continue
+                if cost_value <= 0:
+                    continue
+                bucket = stats.setdefault(typ, {"costs": [], "successes": 0, "count": 0})
+                bucket["costs"].append(cost_value)
+                bucket["count"] += 1
+                ok = rec.get("success")
+                if ok is True or str(ok).lower() in {"true", "1", "yes"}:
+                    bucket["successes"] += 1
+    except OSError:
+        return stats
+
+    out = {}
+    for typ, bucket in stats.items():
+        costs = bucket["costs"]
+        count = bucket["count"]
+        if not costs or count == 0:
+            continue
+        out[typ] = {
+            "avg_cost": sum(costs) / len(costs),
+            "success_rate": bucket["successes"] / count,
+            "count": count,
+        }
+    return out
+
+
+def load_planner_stats(path: str | os.PathLike[str] | None = None) -> dict:
+    """Resolve empirical planner stats from an explicit path or environment variables.
+
+    Supported env keys: PLANNER_STATS, TRAJ_STATS, TRAJ. The function prefers the
+    first existing file and falls back to an empty dict when nothing is set.
+    """
+    if path is not None and str(path).strip():
+        return load_trajectory_stats(path)
+
+    for key in ("PLANNER_STATS", "TRAJ_STATS", "TRAJ"):
+        candidate = os.environ.get(key)
+        if not candidate:
+            continue
+        if os.path.exists(candidate):
+            return load_trajectory_stats(candidate)
+    return {}
 
 
 def features(task: dict) -> dict:
@@ -37,24 +106,36 @@ def features(task: dict) -> dict:
     }
 
 
-def est_cost(f: dict, out_mult: float = 1.0) -> float:
-    in_tok = SYSTEM_TOKENS + (f["instr_chars"] + f["ctx_chars"]) / 3.0
-    out = PRIOR_OUT.get(f["type"], 300) * max(1.0, float(out_mult))
-    return (in_tok / 10.0 + out) * RETRY_FACTOR
+def est_cost(f: dict, out_mult: float = 1.0, stats: dict | None = None) -> float:
+    base = SYSTEM_TOKENS + (f["instr_chars"] + f["ctx_chars"]) / 3.0
+    prior = PRIOR_OUT.get(f["type"], 300) * max(1.0, float(out_mult))
+    raw = (base / 10.0 + prior) * RETRY_FACTOR
+
+    if stats is not None:
+        empirical = stats.get(f["type"], {}).get("avg_cost")
+        if empirical is not None:
+            return min(raw, 0.75 * raw + 0.25 * empirical)
+    return raw
 
 
-def p_success(f: dict, p_feasible: float = 1.0) -> float:
-    return PRIOR_P.get(f["type"], 0.4) * p_feasible
+def p_success(f: dict, p_feasible: float = 1.0, stats: dict | None = None) -> float:
+    prior = PRIOR_P.get(f["type"], 0.4) * p_feasible
+    if stats is not None:
+        empirical = stats.get(f["type"], {}).get("success_rate")
+        if empirical is not None:
+            return max(0.0, min(1.0, 0.6 * prior + 0.4 * empirical * p_feasible))
+    return prior
 
 
 def rank(items, budget_left: float, reserve: float = 0.15, out_mult: float = 1.0,
-         out_mult_by_type=None):
+         out_mult_by_type=None, stats: dict | None = None):
     """items: list of (task, p_feasible). Returns plan rows in execution order."""
     by_type = out_mult_by_type or {}
     rows = []
     for task, pf in items:
         f = features(task)
-        est, p = est_cost(f, by_type.get(f["type"], out_mult)), p_success(f, pf)
+        est = est_cost(f, by_type.get(f["type"], out_mult), stats=stats)
+        p = p_success(f, pf, stats=stats)
         rows.append({"task": task, "est": est, "p": p, "ratio": p * task["reward"] / est})
     rows.sort(key=lambda r: r["ratio"], reverse=True)
     cap, cum = budget_left * (1 - reserve), 0.0

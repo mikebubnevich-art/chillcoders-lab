@@ -1,0 +1,8 @@
+{
+  "task_id": "unsolvable_data_0011",
+  "task_type": "data_analysis",
+  "instruction": "The file mystery.csv contains a list of employee IDs but no salary values, and no other file provides salary information. What was the total salary paid to all employees? If the requested value cannot be determined from the provided files, write exactly UNSOLVABLE to answer.txt. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
+  "reward": 4,
+  "expected": "UNSOLVABLE",
+  "check": "exact_str"
+}

@@ -17,6 +17,12 @@ from dataclasses import dataclass
 from . import oj_transport
 from .budget import Budget, BudgetExceeded, TaskMeter
 
+try:
+    from .local_runtime import apply_local_runtime  # local-only, gitignored file on this machine
+    apply_local_runtime()
+except ImportError:
+    pass
+
 CHARS_PER_TOKEN = 3.0  # conservative (code / Cyrillic) for pre-call reservation
 
 

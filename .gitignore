@@ -8,8 +8,14 @@ __pycache__/
 # VS Code
 .vscode/
 
-# Local prototype / scratch files
+# Local prototype / scratch files and runtime secrets
 model.py
+.env
+.env.*
+!.env.example
+.env.local
+project/.env.local
+project/harness/local_runtime.py
 
 # External / embedded repositories that should stay local
 agent-core/
@@ -17,6 +23,16 @@ agent-memory/
 agent-security/
 agent-studio/
 jiuwenswarm/
+
+# Generated benchmark / local runtime output
+**/trajectory.jsonl
+**/out/
+**/runs/
+**/*.local
+local-results/
+project/tests/results/
+task-dir/**/answer.txt
+task-dir/**/workspace/answer.txt
 
 # OS files
 .DS_Store

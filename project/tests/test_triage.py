@@ -3,6 +3,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "tools"))
 from harness.tasks import load_tasks
 from harness.triage import triage
+from harness.router import route_task
 from harness import feasibility
 from solvers import try_solve
 import gen_infeasible
@@ -60,6 +61,13 @@ class T(unittest.TestCase):
         r = feasibility.check(t)
         self.assertFalse(r.hard, r.reasons)
         self.assertIn("output_file:results.csv", r.reasons)
+
+    def test_router_is_the_single_source_of_truth(self):
+        t = next(tt for tt in load_tasks(FIX) if tt["type"] == "math")
+        r = route_task(t)
+        self.assertEqual(r.status, "solved")
+        self.assertEqual(r.route, "solver")
+        self.assertEqual(triage(t).status, r.status)
 
     def test_missing_input_file_is_hard(self):
         t = {"dir": os.path.join(FIX, "math_0000"),

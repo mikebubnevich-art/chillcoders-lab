@@ -1,0 +1,8 @@
+{
+  "task_id": "math_medium_0009",
+  "task_type": "math",
+  "instruction": "A shop has 36 boxes with 24 pencils each. It sells 175 pencils, then receives 8 boxes with 15 pencils each. The remaining pencils are packed into bundles of 17; incomplete bundles are not counted. How many complete bundles can be made? Compute with python3. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
+  "reward": 3,
+  "expected": "47",
+  "check": "exact_int"
+}

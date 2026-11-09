@@ -42,12 +42,17 @@ def main():
     ap.add_argument("--workers", type=int, default=int(os.environ.get("WORKERS", 5)))
     ap.add_argument("--task-cap", type=float, default=float(os.environ.get("TASK_CAP", 1500)))
     ap.add_argument("--deadline", type=float, default=float(os.environ.get("DEADLINE_S", 3300)))
+    ap.add_argument("--planner-stats", default=os.environ.get("PLANNER_STATS") or os.environ.get("TRAJ_STATS"),
+                    help="Optional JSONL file with empirical planner data: {type,cost,success}")
     a = ap.parse_args()
 
     t0 = time.time()
     budget = Budget(a.budget)
     client = LLMClient(budget, traj_path=os.environ.get("TRAJ", "/tmp/trajectories.jsonl"),
                        deadline=t0 + a.deadline)
+    stats = planner.load_planner_stats(a.planner_stats)
+    if stats:
+        print(f"[stats] loaded {len(stats)} task types from {a.planner_stats or 'env'}", flush=True)
     results = Results(a.out)
     use_solvers = os.environ.get("DISABLE_SOLVERS") != "1"
     tasks = load_tasks(a.tasks_dir)
@@ -89,7 +94,8 @@ def main():
 
     # ---- phase 2: planned LLM spending ----
     plan = planner.rank(todo, budget.remaining(), out_mult=mult,
-                        out_mult_by_type={"coding": coding_mult, "code": coding_mult})
+                        out_mult_by_type={"coding": coding_mult, "code": coding_mult},
+                        stats=stats)
     selected = [p for p in plan if p["selected"]]
     filler = [p for p in plan if not p["selected"]]
     for p in plan:

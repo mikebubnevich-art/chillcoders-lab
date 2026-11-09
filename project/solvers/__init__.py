@@ -11,10 +11,12 @@ same as no answer but also blocks the cheaper-than-LLM fallback.
 """
 UNSOLVABLE = "__UNSOLVABLE__"
 
-from . import code_solver, data_solver, math_solver, search_solver  # noqa: E402
+from . import (code_solver, data_solver, logic_solver, math_solver, search_solver,
+               shell_solver)  # noqa: E402
 
 _BY_TYPE = {"math": [math_solver], "data_analysis": [data_solver], "search": [search_solver],
-            "coding": [code_solver], "code": [code_solver]}
+            "coding": [code_solver], "code": [code_solver],
+            "shell": [shell_solver], "logic": [logic_solver]}
 
 
 def try_solve(task: dict, dry_run: bool = False):

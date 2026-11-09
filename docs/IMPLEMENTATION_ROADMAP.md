@@ -51,13 +51,14 @@
 
 ### 2.2. Feature Extraction
 
-Статус: существует частично.
+Статус: существует; features (тип, файлы, размеры, длина инструкции, reward,
+тесты) используются планировщиком вместе с эмпирикой по типам задач.
 
 Где: `project/harness/planner.py`
 
 Что нужно:
-- сделать feature extraction отдельным блоком, а не “подмешивать” в planner;
-- добавить реальную статистику по типам задач;
+- держать feature extraction отдельным блоком, а не “подмешивать” в planner;
+- накапливать реальную статистику по типам задач (`p90` стоимости, success rate);
 - добавлять features for: task type, file counts, file sizes, instruction length, reward, test availability.
 
 Взаимодействие:
@@ -74,7 +75,8 @@
 
 ### 2.3. Task Classification
 
-Статус: существует в виде `task_type` и route heuristics.
+Статус: существует; единый `harness/router.py` и явные типы
+`math`, `data_analysis`, `search`, `coding/code`, `shell`, `logic`.
 
 Где: `project/harness/tasks.py`, `project/harness/agent.py`
 
@@ -121,14 +123,17 @@
 
 ### 2.5. Cost Estimation
 
-Статус: существует как heuristic prior.
+Статус: существует; внедрена эмпирическая калибровка из task-level JSONL.
 
-Где: `project/harness/planner.py`
+Где: `project/harness/planner.py`, `project/run_agent.py`, `project/harness/llm_client.py`
 
-Что нужно:
-- заменить грубые priors на empirical calibration;
-- хранить исторические данные по реальным task types;
-- использовать conservative estimates with safety margin.
+Что сделано:
+- `LLMClient.log_task` пишет одну строку на задачу: `{type,cost,success,src,...}`;
+- `load_trajectory_stats` агрегирует `avg_cost`, `p90_cost`, `success_rate`, `count`;
+- `est_cost` берёт `max(prior, blend)` с весом по числу наблюдений и winsorize
+  эмпирики на 3x prior: данные могут поднять оценку, но не занизить её;
+- `run_agent` передаёт именно эмпирические stats в `planner.rank` (раньше
+  имя `stats` перетиралось счётчиками).
 
 Взаимодействие:
 - `planner` -> `budget scheduler`
@@ -174,7 +179,9 @@
 
 ### 2.7. Deterministic Solvers
 
-Статус: существует и это один из ключевых преимуществ проекта.
+Статус: существует и это один из ключевых преимуществ проекта. На
+`generated_tasks/` детерминированное покрытие 12/12 (включая `shell`, `logic` и
+`UNSOLVABLE`), на полном `task-dir` — 20/20, оба прогона за 0 токенов.
 
 Где: `project/solvers/`, `project/harness/dsl.py`
 
@@ -298,14 +305,16 @@
 
 ### 2.12. Trajectory Logger
 
-Статус: exists, but not enough as a decision layer.
+Статус: существует; per-call rows + task-level rows, пригодные для
+калибровки планировщика.
 
-Где: `project/harness/llm_client.py`
+Где: `project/harness/llm_client.py`, `project/run_agent.py`
 
 Что нужно:
-- transform raw trajectory into analyzer-friendly tables;
-- aggregate by task type, model, source, and cost;
-- make it part of “policy tuning” rather than just debug output.
+- держать два уровня: запрос (`tag/model/usage/cost/transport/elapsed`) и задача
+  (`type/cost/success/src/model/reward/sec`);
+- агрегировать по `type/model/src` в `tools/model_matrix.py`;
+- не смешивать task-level строки с per-call при расчёте p50/p95.
 
 Взаимодействие:
 - `llm_client` -> logger

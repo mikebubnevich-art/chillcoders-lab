@@ -213,8 +213,9 @@ def run_model(model, rows, args, out_root):
                     records.append(json.loads(line))
                 except ValueError:
                     pass
-    elapsed = [float(r.get("elapsed") or 0) for r in records if r.get("elapsed")]
-    transports = collections.Counter(r.get("transport", "unknown") for r in records)
+    calls = [r for r in records if "tag" in r]  # per-request rows; task rows have no tag
+    elapsed = [float(r.get("elapsed") or 0) for r in calls if r.get("elapsed")]
+    transports = collections.Counter(r.get("transport", "unknown") for r in calls)
 
     meta = {r["_id"]: r for r in rows}
     task_cost, task_sec, task_src = {}, {}, {}
@@ -228,6 +229,7 @@ def run_model(model, rows, args, out_root):
     false_positive = 0
     reward = 0.0
     task_correct = {}
+    caught_literal = 0
     for tid, answer in solutions.items():
         md = meta.get(tid)
         if md is None:
@@ -235,7 +237,11 @@ def run_model(model, rows, args, out_root):
             unknown += 1
             continue
         if md["_infeasible"]:
-            false_positive += 1
+            # Both conventions are correct: skip silently, or write UNSOLVABLE.
+            if str(answer).strip().upper() == "UNSOLVABLE":
+                caught_literal += 1
+            else:
+                false_positive += 1
             continue
         answered += 1
         ok = is_correct(md, answer)
@@ -280,9 +286,9 @@ def run_model(model, rows, args, out_root):
         "cost_per_solve": round(spent / correct, 1) if correct else None,
         "reward_per_1k": round(reward / spent * 1000, 2) if spent else None,
         "infeasible_total": infeasible_total,
-        "infeasible_caught": int(done.get("infeasible", 0)) if done else 0,
+        "infeasible_caught": int(done.get("infeasible", 0) or 0) + caught_literal,
         "infeasible_answered": false_positive,
-        "calls": len(records),
+        "calls": len(calls),
         "p50_ms": round(statistics.median(elapsed) * 1000) if elapsed else None,
         "p95_ms": round(p95(elapsed) * 1000) if elapsed else None,
         "transports": dict(transports),

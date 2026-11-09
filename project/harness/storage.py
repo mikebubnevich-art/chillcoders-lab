@@ -7,7 +7,37 @@ Two outputs:
 """
 import json
 import os
+import re
 import threading
+
+MARKER_RE = re.compile(
+    r"write\s+(?:exactly\s+|only\s+)?(?:the\s+word\s+)?([A-Z]{2,})\s+to\s+"
+    r"(?:the\s+file\s+)?answer\.txt", re.I)
+CODING_TYPES = ("coding", "code")
+
+
+def requested_marker(instruction: str) -> str:
+    """The exact marker the instruction asks for, or '' when it names none."""
+    m = MARKER_RE.search(instruction or "")
+    return m.group(1).upper() if m else ""
+
+
+def answer_marker(instruction: str) -> str:
+    """Marker to verify/store for a coding task (DONE is the historical default)."""
+    return requested_marker(instruction) or "DONE"
+
+
+def normalize_coding_answer(instruction: str, answer: str) -> str:
+    """'DONE' and the explicitly requested marker are interchangeable.
+
+    Models often obey the old DONE convention even when the task asks for
+    PASS; the checker wants the marker written in the instruction.
+    """
+    want = requested_marker(instruction)
+    ans = str(answer).strip()
+    if want and ans.upper() in ("DONE", want):
+        return want
+    return ans
 
 
 class Results:
@@ -30,6 +60,8 @@ class Results:
 
     def save(self, task, answer: str) -> None:
         ans = answer.strip()
+        if task.get("type") in CODING_TYPES:
+            ans = normalize_coding_answer(task.get("instruction", ""), ans)
         # The checker may read answer.txt in the working dir or in the task
         # dir; write both when they differ (workspace layout).
         targets = [os.path.join(task["dir"], "answer.txt")]

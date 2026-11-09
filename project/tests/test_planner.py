@@ -41,9 +41,24 @@ class T(unittest.TestCase):
             stats = planner.load_trajectory_stats(path)
             self.assertIn("math", stats)
             self.assertAlmostEqual(stats["math"]["avg_cost"], 150.0, places=1)
+            self.assertGreaterEqual(stats["math"]["p90_cost"], 150.0)
             self.assertGreater(stats["math"]["success_rate"], 0.5)
             f = planner.features(mk("emp", "math", 5))
-            self.assertLess(planner.est_cost(f, stats=stats), planner.est_cost(f))
+            # conservative: a cheap empirical bucket never lowers the prior
+            self.assertGreaterEqual(planner.est_cost(f, stats=stats), planner.est_cost(f))
+
+    def test_expensive_empirical_bucket_raises_the_estimate(self):
+        f = planner.features(mk("emp", "math", 5))
+        raw = planner.est_cost(f)
+        stats = {"math": {"avg_cost": 900, "p90_cost": 5000, "success_rate": 0.9, "count": 10}}
+        self.assertGreater(planner.est_cost(f, stats=stats), raw)
+        self.assertGreater(planner.p_success(f, 1.0, stats=stats), planner.p_success(f))
+
+    def test_single_sample_barely_moves_the_prior(self):
+        f = planner.features(mk("one", "coding", 3))
+        raw = planner.est_cost(f)
+        stats = {"coding": {"avg_cost": 9000, "p90_cost": 9000, "success_rate": 1.0, "count": 1}}
+        self.assertLess(planner.est_cost(f, stats=stats) - raw, 0.2 * raw)
 
     def test_load_planner_stats_from_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -55,6 +70,20 @@ class T(unittest.TestCase):
             self.assertIn("coding", stats)
             self.assertAlmostEqual(stats["coding"]["avg_cost"], 1000.0, places=1)
             self.assertAlmostEqual(stats["coding"]["success_rate"], 0.5, places=2)
+
+    def test_client_writes_task_level_planner_rows(self):
+        from harness.budget import Budget
+        from harness.llm_client import LLMClient
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "traj.jsonl")
+            c = LLMClient(Budget(1000), traj_path=path)
+            c.log_task({"task": "t1", "type": "math", "cost": 42.5,
+                        "success": True, "src": "llm0"})
+            c._log({"tag": "t1#0", "model": "m", "usage": {}, "cost": 1})
+            stats = planner.load_trajectory_stats(path)
+            self.assertEqual(stats["math"]["count"], 1)  # per-call rows are not tasks
+            self.assertAlmostEqual(stats["math"]["avg_cost"], 42.5)
+            self.assertEqual(stats["math"]["success_rate"], 1.0)
 
 
 if __name__ == "__main__":

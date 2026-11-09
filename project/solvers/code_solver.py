@@ -18,6 +18,7 @@ import sys
 import tempfile
 
 from . import UNSOLVABLE
+from harness.storage import answer_marker
 
 # ---- reference implementations used only as a behavioural cross-check ----
 REF = {
@@ -59,6 +60,11 @@ ATTRS = {"lower": "upper", "upper": "lower", "startswith": "endswith", "endswith
 def _slots(tree):
     """Yield (priority, node_index, apply(copy_of_node)) for every single mutation."""
     nodes = list(ast.walk(tree))
+    params = {}
+    for f in ast.walk(tree):
+        if isinstance(f, ast.FunctionDef):
+            for n in ast.walk(f):
+                params[id(n)] = [a.arg for a in f.args.args]
     out = []
     for i, n in enumerate(nodes):
         if isinstance(n, ast.Compare):
@@ -87,7 +93,32 @@ def _slots(tree):
             for op in (ast.Add, ast.Sub):
                 out.append((1, i, lambda m, op=op: m.__dict__.update(
                     _wrap=ast.BinOp(copy.deepcopy(m), op(), ast.Constant(1)))))
+        # "return min(value, high)" where a parameter is ignored -> clamp-like
+        # bug: wrap the result in max(param, ...) / min(param, ...).
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Call) \
+                and isinstance(n.value.func, ast.Name) and n.value.func.id in ("min", "max"):
+            used = {x.id for x in ast.walk(n.value) if isinstance(x, ast.Name)}
+            other = "max" if n.value.func.id == "min" else "min"
+            for p in params.get(id(n), []):
+                if p in used:
+                    continue
+                out.append((0, i, lambda m, p=p, other=other: m.__dict__.update(
+                    _wrap=ast.Return(value=ast.Call(func=ast.Name(id=other, ctx=ast.Load()),
+                                                    args=[ast.Name(id=p, ctx=ast.Load()),
+                                                          copy.deepcopy(m.value)],
+                                                    keywords=[])))))
+        # "a + b / 2" parses as a + (b/2); the intended average is (a+b)/2.
+        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub)) \
+                and isinstance(n.right, ast.BinOp) and isinstance(n.right.op, ast.Div):
+            out.append((0, i, lambda m: _rotate_precedence(m)))
     return nodes, out
+
+
+def _rotate_precedence(m):
+    right, op = m.right, m.op
+    m.left = ast.BinOp(left=m.left, op=op, right=right.left)
+    m.op = ast.Div()
+    m.right = right.right
 
 
 def _mutants(src, only_funcs):
@@ -188,10 +219,13 @@ def _noneq(src):
 
 
 def solve(instruction: str, task_dir: str, dry_run: bool = False):
-    tm = re.search(r"python3?\s+([\w./-]+\.py)", instruction)
-    mm = re.search(r"(?:bugs in|fix)\s+`?([\w./-]+\.py)", instruction)
+    # "python3 -m unittest test_mylib.py" and "python3 test_mylib.py"
+    tm = re.search(r"python3?\s+(?:-m\s+(?:unittest|pytest)\s+)?([\w./-]+\.py)", instruction)
+    mm = re.search(r"(?:bugs?\s+in|fix(?:ing)?|correct(?:ing)?|repair(?:ing)?)\s+`?([\w./-]+\.py)",
+                   instruction, re.I)
     if not tm or not mm:
         return None
+    marker = answer_marker(instruction)
     test_file, mod_file = tm.group(1), mm.group(1)
     if not (os.path.isfile(os.path.join(task_dir, test_file)) and os.path.isfile(os.path.join(task_dir, mod_file))):
         return UNSOLVABLE
@@ -228,6 +262,6 @@ def solve(instruction: str, task_dir: str, dry_run: bool = False):
             return None  # could not reach all-green: LLM fallback
         if src != orig and not dry_run:
             shutil.copy(mod_path, os.path.join(task_dir, mod_file))
-        return "DONE"
+        return marker
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

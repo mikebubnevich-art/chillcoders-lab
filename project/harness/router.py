@@ -6,6 +6,7 @@ path.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from solvers import UNSOLVABLE, try_solve
@@ -33,6 +34,18 @@ def route_task(task: dict, use_solvers: bool = True) -> RouteDecision:
     """
     ans = try_solve(task, dry_run=not use_solvers)
     if ans == UNSOLVABLE:
+        # Two different conventions exist: a missing/unanswerable task is
+        # skipped (no answer.txt), while a task that explicitly asks to write
+        # UNSOLVABLE when the data is insufficient must get that literal answer.
+        if re.search(r"write\s+(?:exactly\s+|only\s+)?(?:the\s+word\s+)?UNSOLVABLE\b",
+                     task.get("instruction", ""), re.I):
+            return RouteDecision(
+                status="solved",
+                answer="UNSOLVABLE",
+                reasons=["solver:unsolvable-answer"],
+                route="solver",
+                reason_code="unsolvable_answer",
+            )
         return RouteDecision(
             status="infeasible",
             reasons=["solver:unsolvable"],

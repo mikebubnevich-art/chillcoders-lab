@@ -55,12 +55,16 @@ def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
 
     out = {}
     for typ, bucket in stats.items():
-        costs = bucket["costs"]
+        costs = sorted(bucket["costs"])
         count = bucket["count"]
         if not costs or count == 0:
             continue
+        # p90 is the conservative tail: one expensive task must not hide behind
+        # a pile of cheap ones when we reserve budget for it.
+        p90 = costs[min(len(costs) - 1, int(round(0.9 * (len(costs) - 1))))]
         out[typ] = {
             "avg_cost": sum(costs) / len(costs),
+            "p90_cost": p90,
             "success_rate": bucket["successes"] / count,
             "count": count,
         }
@@ -106,25 +110,41 @@ def features(task: dict) -> dict:
     }
 
 
+def _empirical_weight(st: dict) -> float:
+    """How much to trust an empirical bucket: 0 for one sample, max 0.5 at 10+."""
+    try:
+        n = max(1, int(st.get("count") or 1))
+    except (TypeError, ValueError):
+        n = 1
+    return min(0.5, n / 20.0)
+
+
 def est_cost(f: dict, out_mult: float = 1.0, stats: dict | None = None) -> float:
     base = SYSTEM_TOKENS + (f["instr_chars"] + f["ctx_chars"]) / 3.0
     prior = PRIOR_OUT.get(f["type"], 300) * max(1.0, float(out_mult))
     raw = (base / 10.0 + prior) * RETRY_FACTOR
 
-    if stats is not None:
-        empirical = stats.get(f["type"], {}).get("avg_cost")
-        if empirical is not None:
-            return min(raw, 0.75 * raw + 0.25 * empirical)
-    return raw
+    st = (stats or {}).get(f["type"], {})
+    empirical = st.get("p90_cost", st.get("avg_cost"))
+    if empirical is None:
+        return raw
+    # One wild sample must not triple the budget: winsorize the empirical
+    # bucket at 3x the a-priori estimate before blending it in.
+    empirical = min(float(empirical), 3.0 * raw)
+    w = _empirical_weight(st)
+    # Conservative: empirical data may raise the estimate but never lower it
+    # below the a-priori envelope. Under-reserving is what blows the budget.
+    return max(raw, (1.0 - w) * raw + w * float(empirical))
 
 
 def p_success(f: dict, p_feasible: float = 1.0, stats: dict | None = None) -> float:
     prior = PRIOR_P.get(f["type"], 0.4) * p_feasible
-    if stats is not None:
-        empirical = stats.get(f["type"], {}).get("success_rate")
-        if empirical is not None:
-            return max(0.0, min(1.0, 0.6 * prior + 0.4 * empirical * p_feasible))
-    return prior
+    st = (stats or {}).get(f["type"], {})
+    empirical = st.get("success_rate")
+    if empirical is None:
+        return prior
+    w = _empirical_weight(st)
+    return max(0.0, min(1.0, (1.0 - w) * prior + w * empirical * p_feasible))
 
 
 def rank(items, budget_left: float, reserve: float = 0.15, out_mult: float = 1.0,

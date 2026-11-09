@@ -32,11 +32,25 @@ def solve(instruction: str, task_dir: str):
     if not rows:
         return None
     cols = list(rows[0].keys())
-    qs = [x for x in re.split(r"(?<=[.?!])\s+", instruction) if x.rstrip().endswith("?")]
-    if len(qs) != 1:
+    # A question normally ends with '?'. Some templates omit it ("Find the
+    # total number of units of pen sold in quarter 2."), so fall back to the
+    # single sentence that asks for an aggregate. Several such sentences are
+    # ambiguous -> let the LLM handle the task.
+    sent = [x for x in re.split(r"(?<=[.?!])\s+", instruction) if x.strip()]
+    qs = [x for x in sent if x.rstrip().endswith("?")]
+    if len(qs) == 1:
+        question = qs[0]
+    elif not qs:
+        agg = [x for x in sent if re.search(
+            r"\b(?:total|sum|how many|number of|count|average|mean|median|maximum|minimum|"
+            r"highest|lowest|largest|smallest|percentage|percent|revenue)\b", x, re.I)]
+        if len(agg) != 1:
+            return None
+        question = agg[0]
+    else:
         return None
     full_low = instruction.lower()  # formatting hints ("round to 2 decimals") may follow the question
-    instruction = qs[0]  # ONLY the question: the preamble lists all column names
+    instruction = question  # ONLY the question: the preamble lists all column names
     low = instruction.lower()
     numeric = [c for c in cols if all(_num(r[c]) is not None for r in rows)]
     cat = [c for c in cols if c not in numeric]
@@ -75,8 +89,12 @@ def solve(instruction: str, task_dir: str):
     dm = re.search(r"round(?:ed)?\s+to\s+(\d+)\s+decimal", full_low)
     decimals = int(dm.group(1)) if dm else None
 
-    if "revenue" in low and "units" in numeric and "price" in numeric:
-        return _fmt(sum(_num(x["units"]) * _num(x["price"]) for x in sel), decimals)
+    qty_col = next((c for c in numeric if c.lower() in ("units", "quantity", "qty")), None)
+    price_col = next((c for c in numeric if c.lower() in ("price", "unit_price", "unitprice")), None)
+    revenue_asked = ("revenue" in low and qty_col and price_col
+                     and not re.search(r"\bnot\s+revenue\b|\bsum\s+units\b", low))
+    if revenue_asked:
+        return _fmt(sum(_num(x[qty_col]) * _num(x[price_col]) for x in sel), decimals)
     if re.search(r"(how many|number of|count of)\s+(orders|rows|records|sales)", low):
         return str(len(sel))
     dm = re.search(r"(?:how many|number of|count of)\s+(?:unique|distinct)\s+([a-z_]+)", low)
@@ -97,7 +115,7 @@ def solve(instruction: str, task_dir: str):
         if group_col:
             count_mode = tword in ("orders", "rows", "records")
             target = next((c for c in numeric if c.lower() in (tword, tword.rstrip("s")) and c != "order_id"), None)
-            revenue_mode = tword in ("revenue", "sales") and "units" in numeric and "price" in numeric
+            revenue_mode = tword in ("revenue", "sales") and bool(qty_col and price_col)
             if not (count_mode or target or revenue_mode):
                 return None
             buckets = {}
@@ -105,7 +123,7 @@ def solve(instruction: str, task_dir: str):
                 if count_mode:
                     v = 1.0
                 elif revenue_mode:
-                    v = _num(x["units"]) * _num(x["price"])
+                    v = _num(x[qty_col]) * _num(x[price_col])
                 else:
                     v = _num(x[target])
                 if v is not None:
@@ -126,11 +144,21 @@ def solve(instruction: str, task_dir: str):
             return winners[0] if len(winners) == 1 else None
     head = re.search(r"(?:how many|total|sum of|average|mean|median|maximum|minimum|highest|lowest|largest|smallest)"
                      r"\s+(?:of\s+)?(?:the\s+)?([a-z_]+)", low)
+    # "total number of units of pen sold" -> measure is "units", not "number"
+    m = re.search(r"(?:total|sum|number)\s+(?:number\s+)?of\s+([a-z_]+)", low)
     target = None
-    if head:
+    if m:
+        w = m.group(1)
+        target = next((c for c in numeric if c.lower() in (w, w.rstrip("s")) and c != "order_id"), None)
+    if target is None and head:
         w = head.group(1)
         target = next((c for c in numeric if c.lower() in (w, w.rstrip("s")) and c != "order_id"), None)
     if target is None:
+        # A numeric aggregate was asked for, but the CSV has no numeric column
+        # at all: the value is provably not in the files.
+        if not numeric and re.search(
+                r"\b(?:total|sum|average|mean|median|maximum|minimum|highest|lowest|largest|smallest)\b", low):
+            return UNSOLVABLE
         return None
     vals = [_num(x[target]) for x in sel]
     if not vals:

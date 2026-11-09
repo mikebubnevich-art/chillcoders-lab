@@ -29,6 +29,17 @@ SYN = {
 }
 
 
+PROSE_FIELD = {"born": "born", "founded": "founded", "established": "founded",
+               "launched": "founded", "created": "founded", "formed": "founded",
+               "started": "founded"}
+ENTITY_FACT = re.compile(
+    r"(?P<ent>[A-Z][A-Za-z.'&-]*(?:\s+[A-Z][A-Za-z.'&-]*){0,3})\s+"
+    r"(?:was|is|were|are)\s+(?P<field>born|founded|established|launched|created|formed|started)\s+in\s+"
+    r"(?P<val>\d{4})")
+TITLE_FACT = re.compile(
+    r"\b(?:founded|established|launched|created|formed|began|started)\s+in\s+(\d{4})", re.I)
+
+
 def _load(kb):
     ents, text = {}, []
     for root, _, files in os.walk(kb):
@@ -47,7 +58,20 @@ def _load(kb):
                 m = re.match(r"\s*[-*]?\s*([A-Za-z ]+?)\s*:\s*(.+?)\s*$", l)
                 if m:
                     fields[m.group(1).strip().lower()] = m.group(2).strip()
-            ents[title] = fields
+            ents.setdefault(title, {}).update(fields)
+            # Prose facts: "Jonas Reed was born in 1987." -> entity card.
+            for line in lines:
+                for sentence in re.split(r"(?<=[.?!])\s+", line):
+                    for m in ENTITY_FACT.finditer(sentence):
+                        name = m.group("ent").strip()
+                        if name == title or name.split()[0] in ("The", "This", "It"):
+                            continue
+                        ents.setdefault(name, {}).setdefault(
+                            PROSE_FIELD[m.group("field").lower()], m.group("val"))
+            # Facts stated about the file's own title: "# Cedarline Systems" +
+            # "Founded in 2004." -> founded=2004.
+            for m in TITLE_FACT.finditer(t):
+                ents[title].setdefault("founded", m.group(1))
     return ents, "\n".join(text)
 
 

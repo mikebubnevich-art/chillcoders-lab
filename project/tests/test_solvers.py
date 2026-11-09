@@ -1,7 +1,7 @@
 import csv, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from solvers import UNSOLVABLE, data_solver, math_solver, search_solver
+from solvers import UNSOLVABLE, data_solver, math_solver, search_solver, try_solve
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures/tasks")
 PRE = "The file sales.csv has columns order_id,region,product,month,units,price (20 rows). "
@@ -279,6 +279,138 @@ class CodeRepair(unittest.TestCase):
         open(f"{d}/mylib.py", "w").write("def f():\n    return 'wrong'\n")
         open(f"{d}/test_mylib.py", "w").write("import unittest, mylib as m\nclass T(unittest.TestCase):\n    def test_f(self): self.assertEqual(m.f(), 'right')\nif __name__=='__main__': unittest.main()\n")
         self.assertIsNone(code_solver.solve(INSTR, d))
+
+
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(FIX))))
+GEN = os.path.join(REPO, "generated_tasks")
+
+
+class GeneratedBenchmark(unittest.TestCase):
+    """The committed generated_tasks/ set is the deterministic regression corpus."""
+
+    def gen(self, tid):
+        import json
+        d = os.path.join(GEN, tid)
+        meta = json.load(open(os.path.join(d, "task.json"), encoding="utf-8"))
+        return {"id": tid, "dir": d, "root": d, "type": meta["task_type"],
+                "instruction": meta["instruction"], "reward": meta.get("reward", 1)}
+
+    def test_feasible_generated_tasks_are_solved_deterministically(self):
+        expected = {"data_easy_0003": "50", "data_medium_0004": "154",
+                    "math_easy_0001": "274", "math_hard_0002": "268", "math_medium_0009": "47",
+                    "search_easy_0005": "1987", "search_medium_0012": "2004",
+                    "shell_medium_0008": "92"}
+        for tid, want in expected.items():
+            with self.subTest(tid=tid):
+                self.assertEqual(str(try_solve(self.gen(tid), dry_run=True)), want)
+
+    def test_unsolvable_generated_tasks_get_the_literal_answer(self):
+        from harness.router import route_task
+        for tid in ("unsolvable_data_0011", "unsolvable_logic_0010"):
+            with self.subTest(tid=tid):
+                r = route_task(self.gen(tid))
+                self.assertEqual(r.status, "solved")
+                self.assertEqual(r.answer, "UNSOLVABLE")
+
+    def test_generated_coding_tasks_are_fixed_and_use_the_pass_marker(self):
+        for tid in ("coding_medium_0006", "coding_hard_0007"):
+            with self.subTest(tid=tid):
+                d = tempfile.mkdtemp(prefix=f"gen_{tid}_")
+                try:
+                    shutil.copytree(os.path.join(GEN, tid), d, dirs_exist_ok=True)
+                    t = self.gen(tid)
+                    self.assertEqual(code_solver.solve(t["instruction"], d), "PASS")
+                    p = subprocess.run([sys.executable, "-m", "unittest", "test_mylib.py"], cwd=d,
+                                       capture_output=True, text=True)
+                    self.assertEqual(p.returncode, 0, p.stderr[-400:])
+                finally:
+                    shutil.rmtree(d, ignore_errors=True)
+
+
+class Markers(unittest.TestCase):
+    def test_answer_marker(self):
+        from harness.storage import answer_marker, normalize_coding_answer
+        self.assertEqual(answer_marker("Then write only PASS to answer.txt."), "PASS")
+        self.assertEqual(answer_marker("write ONLY the word DONE to the file answer.txt"), "DONE")
+        self.assertEqual(answer_marker("no marker here"), "DONE")
+        self.assertEqual(normalize_coding_answer("write exactly PASS to answer.txt", "DONE"), "PASS")
+        self.assertEqual(normalize_coding_answer("write exactly PASS to answer.txt", "PASS"), "PASS")
+        self.assertEqual(normalize_coding_answer("no marker", "DONE"), "DONE")
+
+
+class Math3(unittest.TestCase):
+    def test_has_with_lots_and_floor_bundles(self):
+        q = ("A shop has 36 boxes with 24 pencils each. It sells 175 pencils, then receives 8 boxes "
+             "with 15 pencils each. The remaining pencils are packed into bundles of 17; incomplete "
+             "bundles are not counted. How many complete bundles can be made?")
+        self.assertEqual(_ms.solve(q, ""), "47")
+
+    def test_fraction_and_discarded_remainder(self):
+        q = ("A tank contains 987 liters. First remove one third of the water (round the amount "
+             "removed down to a whole liter). Add 125 liters. Then divide the water equally among 4 "
+             "tanks and keep one share, discarding any remainder. Finally add 73 liters. How many "
+             "liters remain?")
+        self.assertEqual(_ms.solve(q, ""), "268")
+
+    def test_non_exact_division_without_hint_is_unknown(self):
+        q = ("A shop has 10 items. Then divide the items equally among 3 boxes and keep one share. "
+             "How many items remain?")
+        self.assertIsNone(_ms.solve(q, ""))
+
+
+class Data2(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="data_v3_")
+        with open(os.path.join(self.d, "orders.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["id", "city", "quantity", "price", "month"])
+            w.writerows([[1, "Oslo", 10, 4, 1], [2, "Riga", 5, 8, 2], [3, "Oslo", 7, 9, 2],
+                         [4, "Oslo", 8, 5, 4], [5, "Oslo", 3, 9, 4]])
+        with open(os.path.join(self.d, "t.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["category", "quarter", "units", "unit_price"])
+            w.writerows([["pen", 1, 14, 2], ["pen", 2, 21, 2], ["pen", 2, 13, 3], ["pen", 2, 16, 2]])
+        with open(os.path.join(self.d, "emp.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["employee_id", "department"])
+            w.writerows([["E1", "Sales"], ["E2", "Support"]])
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_quantity_price_revenue_without_question_mark(self):
+        q = ("Using orders.csv, calculate the total revenue (quantity multiplied by price for each "
+             "row) for orders from Oslo in months 2 through 4 inclusive. Use python3.")
+        self.assertEqual(data_solver.solve(q, self.d), "130")
+
+    def test_total_number_of_units_not_revenue(self):
+        q = ("The file t.csv contains sales transactions. Find the total number of units of pen sold "
+             "in quarter 2 (sum units, not revenue). Use python3 to calculate it.")
+        self.assertEqual(data_solver.solve(q, self.d), "50")
+
+    def test_numeric_measure_missing_is_unsolvable(self):
+        q = "The file emp.csv has columns employee_id,department. What was the total salary?"
+        self.assertEqual(data_solver.solve(q, self.d), UNSOLVABLE)
+
+
+class SearchProse(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="kb_prose_")
+        kb = os.path.join(self.d, "kb")
+        os.makedirs(kb)
+        with open(os.path.join(kb, "people.md"), "w", encoding="utf-8") as f:
+            f.write("# Staff biographies\nMara Chen was born in 1991.\nJonas Reed was born in 1987.\n")
+        with open(os.path.join(kb, "company.md"), "w", encoding="utf-8") as f:
+            f.write("# Cedarline Systems\nFounded in 2004. Main office: Halifax.\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_person_fact_from_prose(self):
+        self.assertEqual(search_solver.solve("In which year was Jonas Reed born?", self.d), "1987")
+
+    def test_title_fact_from_prose(self):
+        self.assertEqual(search_solver.solve("When was Cedarline Systems founded?", self.d), "2004")
 
 
 if __name__ == "__main__":

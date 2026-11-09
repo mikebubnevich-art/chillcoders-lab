@@ -1,4 +1,4 @@
-import json, os, shutil, sys, unittest
+import json, os, shutil, sys, tempfile, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "tools"))
 from harness.tasks import load_tasks
@@ -75,6 +75,24 @@ class T(unittest.TestCase):
         r = feasibility.check(t)
         self.assertTrue(r.hard, r.reasons)
         self.assertIn("missing_file:inventory.csv", r.reasons)
+
+    def test_explicit_unsolvable_instruction_is_answered_not_skipped(self):
+        d = tempfile.mkdtemp(prefix="tri_uns_")
+        try:
+            with open(os.path.join(d, "mystery.csv"), "w", encoding="utf-8") as f:
+                f.write("employee_id,department\nE1,Sales\nE2,Support\n")
+            q = ("The file mystery.csv contains a list of employee IDs but no salary values. "
+                 "What was the total salary paid to all employees? ")
+            t = {"id": "uns", "type": "data_analysis", "dir": d, "reward": 1,
+                 "instruction": q + "If the requested value cannot be determined, write exactly "
+                                    "UNSOLVABLE to answer.txt."}
+            r = route_task(t)
+            self.assertEqual((r.status, r.answer, r.route), ("solved", "UNSOLVABLE", "solver"))
+            # Without the literal-answer instruction, an unanswerable task is skipped.
+            t2 = dict(t, instruction=q)
+            self.assertEqual(route_task(t2).status, "infeasible")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

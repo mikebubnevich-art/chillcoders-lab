@@ -60,7 +60,8 @@ def main():
     mult = out_mult(a.model)
     coding_mult = out_mult(a.coding_model) if a.coding_model else mult
 
-    stats = {"solved": 0, "solver": 0, "llm_solved": 0, "infeasible": 0, "failed": 0, "skipped": 0, "reward": 0.0}
+    counts = {"solved": 0, "solver": 0, "llm_solved": 0, "infeasible": 0, "failed": 0,
+              "skipped": 0, "reward": 0.0}
     lock = threading.Lock()
     print(f"[run] {len(tasks)} tasks, budget={a.budget:.0f}, model={a.model}, "
           f"coding_model={a.coding_model or '-'}, workers={workers}, "
@@ -69,7 +70,7 @@ def main():
     def bump(**kw):
         with lock:
             for k, v in kw.items():
-                stats[k] += v
+                counts[k] += v
 
     # ---- phase 1: free triage ----
     def phase1(t):
@@ -128,8 +129,12 @@ def main():
             bump(solved=1, llm_solved=1, reward=t["reward"])
         else:
             bump(failed=1)
+        sec = time.time() - t_task
+        client.log_task({"task": t["id"], "type": t.get("type", "unknown"),
+                         "cost": round(meter.spent, 2), "success": bool(ans), "src": src,
+                         "model": model, "reward": t.get("reward", 0), "sec": round(sec, 2)})
         print(f"[task] {t['id']:<22} {src:<9} cost={meter.spent:7.1f} "
-              f"sec={time.time() - t_task:5.1f} {budget.snapshot()}", flush=True)
+              f"sec={sec:5.1f} {budget.snapshot()}", flush=True)
 
     def run_wave(rows, name):
         if not rows:
@@ -153,7 +158,8 @@ def main():
     if time.time() - t0 <= a.deadline:
         run_wave(admit(filler), "2/filler")
 
-    print("[done]", json.dumps({**stats, **budget.snapshot(), "sec": round(time.time() - t0, 1)}), flush=True)
+    print("[done]", json.dumps({**counts, **budget.snapshot(), "sec": round(time.time() - t0, 1)}),
+          flush=True)
 
 
 if __name__ == "__main__":

@@ -52,18 +52,27 @@ A/B measurement; `tests/e2e.py::test_openjiuwen_transport_is_used` runs only whe
 
 ## Flow
 **Phase 1 - triage, 0 tokens, all tasks, parallel** (`harness/triage.py`):
-1. Template solvers (`solvers/`): `math_solver` (chain of split/double/ship/receive steps), `data_solver`
-   (csv filters + sum/count/avg/min/max/revenue), `search_solver` (kb/*.md graph: link fields like Employer/Mentor,
-   terminal fields like Born/Headquarters), `code_solver` (see below). A solver returns an answer, `None`
-   (pattern unknown -> LLM) or `UNSOLVABLE`. When unsure a solver returns `None`; it never guesses.
+1. Template solvers (`solvers/`): `math_solver` (chain of split/double/ship/receive steps, lots, fractions with
+   rounding, bundles), `data_solver` (csv filters + sum/count/avg/min/max/revenue/percent/sum_product),
+   `search_solver` (kb/*.md graph: link fields like Employer/Mentor, terminal fields like Born/Headquarters,
+   plus facts stated in prose), `code_solver` (see below), `shell_solver` (largest/smallest even-odd, sum,
+   count over one-integer-per-line files) and `logic_solver` (provable inconsistency -> `UNSOLVABLE`). A solver
+   returns an answer, `None` (pattern unknown -> LLM) or `UNSOLVABLE`. When unsure a solver returns `None`; it
+   never guesses.
 2. Feasibility heuristics (`harness/feasibility.py`): file/dir referenced in the text but absent, internet/URL
    required, empty instruction -> task skipped for free (no answer written).
 
 **Phase 2 - LLM, only for what phase 1 could not solve** (`harness/planner.py`, `harness/agent.py`,
 `harness/dsl.py`):
-tasks ordered by `P(success) * reward / E[tokens]` (a-priori model now, to be calibrated from trajectories),
-greedy fill of 85% of the budget. Two waves: wave 1 runs only the planner-selected tasks; after it finishes,
-wave 2 admits filler tasks greedily against the **actual** remaining budget.
+tasks ordered by `P(success) * reward / E[tokens]`, greedy fill of 85% of the budget. **Two waves**: wave 1
+runs only the planner-selected tasks; after it finishes, wave 2 admits filler tasks greedily against the
+**actual** remaining budget.
+
+The planner is calibrated from past runs but stays conservative: `LLMClient.log_task` writes one row per task
+(`{type,cost,success,src,...}`), `load_trajectory_stats` aggregates `avg_cost`, `p90_cost`, `success_rate` and
+`count` per type, and `est_cost` returns `max(prior, blend)`. Empirical data may raise an estimate but never
+lower it below the a-priori envelope; the empirical value is winsorized at `3*prior` and weighted by
+`min(0.5, count/20)`, so a single lucky cheap run cannot under-reserve the budget.
 
 For math/data/search the first call asks the model to **compile** the task into a compact JSON plan
 (math ops, CSV filters+aggregate, KB hops). `harness/dsl.py` parses, validates and executes it locally:
@@ -86,23 +95,31 @@ environment. Only `answer.txt` is copied back; for coding tasks, changed non-tes
 back too. Very large task dirs (> `SANDBOX_MAX_MB`) fall back to in-place execution with the same limits and
 in-memory test snapshots.
 
-Coding tasks get a verifier: the answer is accepted only when `answer.txt` is exactly `DONE` **and** the test
-command from the instruction (e.g. `python3 test_mylib.py`, or discovered `test_*.py`) exits 0. Test files are
-restored from a snapshot before verification, so editing/deleting tests cannot make a task look solved.
+Coding tasks get a verifier: the answer is accepted only when `answer.txt` contains the marker requested by the
+instruction (`PASS`, `DONE`, …) or the legacy `DONE`, **and** the test command from the instruction
+(e.g. `python3 test_mylib.py`, or discovered `test_*.py`) exits 0. Test files are restored from a snapshot
+before verification, so editing/deleting tests cannot make a task look solved. The stored answer is normalized
+to the requested marker (`harness/storage.py::normalize_coding_answer`).
 
 Results: `answer.txt` in the working dir and in `<task>/` (when they differ), plus `OUT/solutions.json`,
 written after EVERY solved task.
 
 ### code_solver (0-token bug fixing)
 Enumerates single AST mutations (comparison/arith/bool flips, sorted<->reversed, min<->max, constants +-1,
-slice bounds, len +-1) of the functions touched by failing tests, greedily keeps the mutation that removes the
-most failures. For functions with a known reference (`REF`: reverse_words, total, maximum, minimum, average,
-first_n, count_even, count_odd) it also requires behavioural equivalence on random inputs (ints AND floats) and
-repairs functions that disagree with the reference even if the visible tests are green (hidden tests may be
-stricter). Tests are never edited. Unknown functions are accepted by tests only.
+slice bounds, len +-1), plus two structural repairs: wrapping a `min`/`max` return in an ignored parameter
+(clamp-like bug) and rotating `a + b / 2` into `(a + b) / 2` (even-median). It greedily keeps the mutation
+that removes the most failures. For functions with a known reference (`REF`: reverse_words, total, maximum,
+minimum, average, first_n, count_even, count_odd) it also requires behavioural equivalence on random inputs
+(ints AND floats) and repairs functions that disagree with the reference even if the visible tests are green
+(hidden tests may be stricter). Tests are never edited. Unknown functions are accepted by tests only. The
+returned answer is the marker requested by the instruction.
 
 ## Non-obvious
 - `expected`/`check` from task.json are never read by the agent (local tests only).
+- Two infeasible conventions coexist. If the instruction explicitly says to write `UNSOLVABLE` when the value
+  cannot be determined, the literal answer `UNSOLVABLE` is written; otherwise a provably infeasible task is
+  skipped with no `answer.txt`. The literal-answer branch is gated on the `write … UNSOLVABLE` wording, not on
+  any mention of the word.
 - A coding answer is never trusted from `answer.txt` alone: the original tests must pass locally.
 - A missing file referenced as an OUTPUT (`write the result to results.csv`) is not treated as infeasible;
   a missing INPUT file still is.
@@ -111,11 +128,19 @@ stricter). Tests are never edited. Unknown functions are accepted by tests only.
 - If OUT is unwritable we fall back to /tmp/solutions.json.
 
 ## Tests (no real LLM needed)
-`python -m unittest discover -s tests -p 'test_*.py'` and `python tests/e2e.py` (mock proxy, fixtures from the
-sample tasks; `search_synth` and `code_synth` are synthetic). The e2e suite covers two-wave scheduling,
-DONE-without-fix rejection, test tampering, a successful LLM fix, sandbox isolation, timeouts, DSL plans,
-the DSL->script fallback, coding patch plans and both task layouts (`workspace/` and flat). Synthetic
-infeasible tasks: `tools/gen_infeasible.py`. Real-model cost: `python tools/measure_overhead.py`.
+`python -m unittest discover -s tests -p 'test_*.py'` (141 tests) and `python tests/e2e.py` (16 tests, mock
+proxy, fixtures from the sample tasks; `search_synth` and `code_synth` are synthetic). The e2e suite covers
+two-wave scheduling, DONE-without-fix rejection, test tampering, a successful LLM fix, sandbox isolation,
+timeouts, DSL plans, the DSL->script fallback, coding patch plans, both task layouts (`workspace/` and flat),
+and planner calibration from a trajectory file. Synthetic infeasible tasks: `tools/gen_infeasible.py`.
+Real-model cost: `python tools/measure_overhead.py`.
+
+## Committed deterministic benchmark
+`generated_tasks/` (12 tasks: math, data, search, shell, coding, logic, two unsatisfiable) is the regression
+corpus for phase 1. Current result: **12/12 correct, 0 wrong, 0 tokens, reward 35**; the full `task-dir` set is
+**20/20, 0 tokens, reward 55**. The set is a real workspace input, so tests copy tasks to a temp dir before
+calling `route_task`/`try_solve` with writes enabled. `tests/test_solvers.py::GeneratedBenchmark` pins the
+expected answers (including the literal `UNSOLVABLE` for the two infeasible ones).
 
 ## Synthetic 100-task benchmark
 ```

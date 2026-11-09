@@ -20,6 +20,7 @@ from . import dsl, patch, runner
 from .budget import BudgetExceeded, TaskMeter
 from .context import build_context
 from .llm_client import LLMClient
+from .storage import answer_marker
 
 SYSTEM = ("Solve the task by writing ONE python3 script (stdlib, pandas, sympy allowed). "
           "Reply with a single ```python block and no prose. The script runs in the "
@@ -133,8 +134,9 @@ def _verify_coding(sb: runner.Sandbox, instruction: str):
     extras = [a for c in cmds for a in c[1:] if a.endswith(".py") and not a.startswith("-")]
     sb.restore_tests(extras)
     ans = sb.read_answer()
-    if ans.strip().upper() != "DONE":
-        return False, f"answer.txt must contain DONE, got {ans[:80]!r}"
+    want = answer_marker(instruction)
+    if ans.strip().upper() not in (want, "DONE"):
+        return False, f"answer.txt must contain {want}, got {ans[:80]!r}"
     if not cmds:
         return True, "no test command found; accepted DONE"
     for argv in cmds:
@@ -155,6 +157,7 @@ def solve_llm(task, client: LLMClient, meter: TaskMeter, model: str, max_tokens:
     mult = out_mult(model)
     max_tokens = max(1, int(max_tokens * mult))
     coding = task.get("type") in CODING_TYPES
+    marker = answer_marker(task["instruction"]) if coding else ""
     ans_path = os.path.join(task["dir"], "answer.txt")
     try:
         os.remove(ans_path)  # never let a stale answer make an unsolved task look solved
@@ -187,13 +190,13 @@ def solve_llm(task, client: LLMClient, meter: TaskMeter, model: str, max_tokens:
                     try:
                         originals = patch.apply(sb.dir, edits)
                         with open(os.path.join(sb.dir, "answer.txt"), "w", encoding="utf-8") as f:
-                            f.write("DONE")
+                            f.write(marker)
                         ok, detail = _verify_coding(sb, task["instruction"])
                     except patch.PatchError as e:
                         ok, detail = False, f"replacement failed: {e}"
                     if ok:
                         sb.commit(("answer.txt",) + tuple(sb.changed_python()))
-                        return "DONE", "patch0"
+                        return marker, "patch0"
                     if originals:
                         patch.revert(sb.dir, originals)
                     script_messages += [
@@ -207,7 +210,7 @@ def solve_llm(task, client: LLMClient, meter: TaskMeter, model: str, max_tokens:
                     ok, detail = _verify_coding(sb, task["instruction"])
                     if ok:
                         sb.commit(("answer.txt",) + tuple(sb.changed_python()))
-                        return "DONE", "llm0"
+                        return marker, "llm0"
                     fb = (f"Script exit {rc}. {detail}\n"
                           "Fix the code (do not edit the tests) and reply with the full script.")
                 else:
@@ -252,7 +255,7 @@ def solve_llm(task, client: LLMClient, meter: TaskMeter, model: str, max_tokens:
                     ok, detail = _verify_coding(sb, task["instruction"])
                     if ok:
                         sb.commit(("answer.txt",) + tuple(sb.changed_python()))
-                        return "DONE", f"llm{attempt}"
+                        return marker, f"llm{attempt}"
                     fb = (f"Script exit {rc}. {detail}\n"
                           "Fix the code (do not edit the tests) and reply with the full script.")
                 else:

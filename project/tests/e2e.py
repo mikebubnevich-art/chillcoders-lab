@@ -173,6 +173,23 @@ class E2E(unittest.TestCase):
         self.assertIn("+fb", log)             # the strong model's retry succeeded
         self.assertNotIn("fb-failed", log)
 
+    def test_planner_stats_from_trajectory_raise_the_estimate(self):
+        src = "/tmp/e2e_stats_src"
+        shutil.rmtree(src, ignore_errors=True); os.makedirs(src)
+        shutil.copytree(f"{FIX}/math_0004", f"{src}/math_0004")
+        traj = "/tmp/e2e_stats_traj.jsonl"
+        with open(traj, "w", encoding="utf-8") as f:
+            for _ in range(10):
+                f.write(json.dumps({"type": "math", "cost": 5000, "success": True}) + "\n")
+        work, out, log, _ = run(100000, port=8782, solvers=False, src=src,
+                                extra_env={"TRAJ": traj})
+        print(log)
+        self.assertIn("[stats] loaded 1 task types", log)
+        m = re.search(r"\[plan\] math_0004\s+est=\s*([\d.]+)", log)
+        self.assertIsNotNone(m, log)
+        self.assertGreater(float(m.group(1)), 300)  # raw prior is ~221
+        self.assertEqual(answers(work).get("math_0004"), "1735")
+
     def test_workspace_layout_coding_via_patch(self):
         src = "/tmp/e2e_workspace"
         shutil.rmtree(src, ignore_errors=True); os.makedirs(src)
@@ -238,9 +255,10 @@ class E2E(unittest.TestCase):
         self.assertEqual(answers(work).get("math_0004"), "1735")
         recs = [json.loads(line) for line in open("/tmp/e2e_traj.jsonl", encoding="utf-8")
                 if line.strip()]
-        self.assertTrue(recs)
-        self.assertTrue(all(r.get("transport") == "openjiuwen" for r in recs), recs)
-        self.assertGreater(recs[0]["usage"].get("prompt_tokens", 0), 0)
+        calls = [r for r in recs if "tag" in r]  # task-level rows carry no transport
+        self.assertTrue(calls)
+        self.assertTrue(all(r.get("transport") == "openjiuwen" for r in calls), recs)
+        self.assertGreater(calls[0]["usage"].get("prompt_tokens", 0), 0)
         done = json.loads(log.strip().splitlines()[-1].split("[done] ")[1])
         self.assertEqual(done["solved"], 1)
 

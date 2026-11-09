@@ -124,6 +124,14 @@ class LLMClient:
         except OSError:
             pass
 
+    def log_task(self, rec: dict) -> None:
+        """Append a task-level telemetry row ({type,cost,success,src,...}).
+
+        Per-call rows above describe individual requests; planner calibration
+        needs one row per task, otherwise a retried task looks like two tasks.
+        """
+        self._log({"t": time.time(), **rec})
+
     def _remaining(self):
         return None if self.deadline is None else self.deadline - time.time()
 

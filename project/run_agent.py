@@ -66,6 +66,7 @@ def main():
     print(f"[run] {len(tasks)} tasks, budget={a.budget:.0f}, model={a.model}, "
           f"coding_model={a.coding_model or '-'}, workers={workers}, "
           f"out_mult={mult:g}/{coding_mult:g}", flush=True)
+    print(f"[runtime] client={client.snapshot()}", flush=True)
 
     def bump(**kw):
         with lock:
@@ -140,8 +141,10 @@ def main():
         if not rows:
             return
         print(f"[wave] {name}: {len(rows)} tasks, remaining={budget.remaining():.0f}", flush=True)
+        print(f"[runtime] before {name}: {client.snapshot()}", flush=True)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(phase2, rows))
+        print(f"[runtime] after {name}: {client.snapshot()}", flush=True)
 
     def admit(rows):
         """Greedy admission against the ACTUAL remaining budget, not the prior plan."""

@@ -84,7 +84,21 @@ class T(unittest.TestCase):
             self.assertEqual(stats["math"]["count"], 1)  # per-call rows are not tasks
             self.assertAlmostEqual(stats["math"]["avg_cost"], 42.5)
             self.assertEqual(stats["math"]["success_rate"], 1.0)
-
+    def test_accepts_mixed_telemetry_variants(self):
+        rows = [
+            {"type": "math", "spent": 120.0, "state": "succeeded"},
+            {"task_type": "coding", "cost": "250", "outcome": "failed"},
+            {"kind": "search", "usage": {"prompt_tokens": 20, "completion_tokens": 10}, "ok": True},
+            {"type": "data_analysis", "usage_metadata": {"input_tokens": 10, "output_tokens": 5}, "status": "error"},
+        ]
+        stats = planner.load_trajectory_stats_from_rows(rows)
+        self.assertIn("math", stats)
+        self.assertIn("coding", stats)
+        self.assertIn("search", stats)
+        self.assertIn("data_analysis", stats)
+        self.assertAlmostEqual(stats["math"]["avg_cost"], 120.0)
+        self.assertAlmostEqual(stats["search"]["success_rate"], 1.0)
+        self.assertAlmostEqual(stats["data_analysis"]["success_rate"], 0.0)
 
 if __name__ == "__main__":
     unittest.main()

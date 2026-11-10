@@ -115,7 +115,7 @@ class LLMClient:
         self._oj_fail_streak = 0
         self._transport_logged = None
         self._provider_health = {"openjiuwen": "healthy", "urllib": "healthy"}
-        self._provider_backoff_until = 0.0
+        self._provider_backoff_until = {"openjiuwen": 0.0, "urllib": 0.0}
 
     def _provider_backoff(self, provider: str, transient: bool):
         if not transient:
@@ -123,10 +123,43 @@ class LLMClient:
         self._provider_health[provider] = "degraded"
         self._oj_fail_streak = max(self._oj_fail_streak, 1 if provider == "openjiuwen" else 0)
         backoff = min(30.0, 2.0 ** max(0, self._oj_fail_streak - 1))
-        self._provider_backoff_until = max(self._provider_backoff_until, time.time() + backoff)
+        self._provider_backoff_until[provider] = max(
+            self._provider_backoff_until.get(provider, 0.0), time.time() + backoff
+        )
 
-    def _provider_ok(self) -> bool:
-        return time.time() >= self._provider_backoff_until
+    def _provider_ok(self, provider: str | None = None) -> bool:
+        if provider is not None:
+            return time.time() >= self._provider_backoff_until.get(provider, 0.0)
+        return all(time.time() >= self._provider_backoff_until.get(p, 0.0)
+                   for p in ("openjiuwen", "urllib"))
+
+    def provider_status(self) -> dict:
+        now = time.time()
+        return {
+            "openjiuwen": {
+                "state": self._provider_health["openjiuwen"],
+                "ready": now >= self._provider_backoff_until.get("openjiuwen", 0.0),
+                "cooldown_until": self._provider_backoff_until.get("openjiuwen", 0.0),
+            },
+            "urllib": {
+                "state": self._provider_health["urllib"],
+                "ready": now >= self._provider_backoff_until.get("urllib", 0.0),
+                "cooldown_until": self._provider_backoff_until.get("urllib", 0.0),
+            },
+        }
+
+    def snapshot(self) -> dict:
+        return {
+            "calls": self.calls,
+            "oj_enabled": self.oj_enabled,
+            "oj_error": self.oj_error,
+            "limiter": {
+                "limit": self._limiter.limit,
+                "inflight": self._limiter.inflight,
+                "floor": self._limiter.floor,
+            },
+            "providers": self.provider_status(),
+        }
 
     def _log(self, rec: dict) -> None:
         if not self.traj_path:
@@ -142,8 +175,13 @@ class LLMClient:
 
         Per-call rows above describe individual requests; planner calibration
         needs one row per task, otherwise a retried task looks like two tasks.
+        We also normalize explicit task status so mixed logs remain readable by
+        downstream stats aggregation.
         """
-        self._log({"t": time.time(), **rec})
+        row = dict(rec)
+        if "status" not in row and "success" in row:
+            row["status"] = "solved" if bool(row["success"]) else "failed"
+        self._log({"t": time.time(), **row})
 
     def _remaining(self):
         return None if self.deadline is None else self.deadline - time.time()
@@ -153,8 +191,6 @@ class LLMClient:
         rem = self._remaining()
         if rem is not None and rem <= 5:
             raise RuntimeError("deadline exceeded")
-        if not self._provider_ok():
-            raise RuntimeError("provider backoff active")
         in_est = sum(est_tokens(m["content"]) + 4 for m in messages)
         worst = in_est / 10.0 + max_tokens
         if worst > meter.room():

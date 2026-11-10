@@ -1,21 +1,5 @@
 # IMPLEMENTATION_ROADMAP
 
-## 0. Repository gate for GitHub
-
-Что должно идти в основной репозиторий:
-- `project/` — production harness, planner, budget, routes, solvers
-- `docs/` — architecture, audit, roadmap and public project map
-- public setup and usage docs without secrets or local run artifacts
-
-Что не должно попадать в GitHub как часть source-of-truth:
-- `benchmarks/` results, probe output, local metrics
-- `config/` runtime overrides and machine-specific locked settings
-- `generated_tasks/`, task copies, temp workspaces, `answer.txt` artifacts
-- `scripts/` ad hoc local validation scripts
-- any `.env`, keys, logs, or runtime-only files
-
-Решение: keep the product code and design docs in GitHub; keep the empirical tuning and local run state outside Git.
-
 ## 1. Цель архитектуры
 
 Итоговая архитектура должна быть не “агентный монолит”, а экономичная соревновательная система с чётким разделением ответственности:

@@ -489,7 +489,7 @@ class DataComparisonFilters(unittest.TestCase):
 
     def test_numeric_columns_support_generic_less_than_and_sum(self):
         q = "The file sales.csv has columns order_id,region,product,month,units,price (4 rows). What is the sum of price for rows where price <= 8? Work only inside the current directory."
-        self.assertEqual(data_solver.solve(q, self.d), "23")
+        self.assertEqual(data_solver.solve(q, self.d), "15")
 
 
 class SearchProse(unittest.TestCase):

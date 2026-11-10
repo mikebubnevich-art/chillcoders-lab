@@ -11,47 +11,134 @@ import re
 
 from .context import build_context
 
+
+def _coerce_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        return v in {"1", "true", "yes", "y", "ok", "success", "solved"}
+    return False
+
+
+def _task_type(rec):
+    typ = rec.get("type") or rec.get("task_type") or rec.get("kind") or rec.get("category") or ""
+    if isinstance(typ, str):
+        typ = typ.strip()
+    if typ:
+        return str(typ)
+    tag = rec.get("tag") or rec.get("task") or rec.get("name") or ""
+    if isinstance(tag, str):
+        tag = tag.strip()
+        if tag and "#" in tag:
+            tag = tag.split("#", 1)[0]
+        if tag:
+            return tag
+    return ""
+
+
+def _usage_cost(rec):
+    usage = rec.get("usage") or rec.get("usage_details") or rec.get("usage_metadata") or {}
+    if hasattr(usage, "model_dump"):
+        try:
+            usage = usage.model_dump()
+        except Exception:
+            usage = {}
+    if not isinstance(usage, dict):
+        return None
+    normalized = {}
+    for key, value in usage.items():
+        if key in {"prompt_tokens", "input_tokens"}:
+            normalized["prompt_tokens"] = value
+        elif key in {"completion_tokens", "output_tokens"}:
+            normalized["completion_tokens"] = value
+        elif key == "reasoning_tokens":
+            normalized["reasoning_tokens"] = value
+        else:
+            normalized[key] = value
+    from .llm_client import cost_of
+    try:
+        return cost_of(normalized)
+    except Exception:
+        return None
+
+
+def _normalize_status(rec):
+    for key in ("status", "state", "outcome", "result"):
+        value = rec.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"solved", "success", "done", "passed", "ok", "succeeded", "true", "1"}:
+                return True
+            if v in {"failed", "error", "timeout", "retry", "skip", "skipped", "false", "0"}:
+                return False
+    return None
+
+
+def _normalize_record(rec):
+    if not isinstance(rec, dict):
+        return None
+    typ = _task_type(rec)
+    if not typ:
+        return None
+    candidates = [
+        rec.get("cost"), rec.get("spent"), rec.get("total_cost"), rec.get("actual_cost"),
+        rec.get("total"), rec.get("tokens_cost"), rec.get("amount"),
+    ]
+    cost = None
+    for candidate in candidates:
+        cost = _coerce_float(candidate)
+        if cost is not None:
+            break
+    if cost is None:
+        cost = _usage_cost(rec)
+    if cost is None or cost <= 0:
+        return None
+    ok = _normalize_status(rec)
+    if ok is None:
+        for key in ("success", "ok", "passed", "succeeded"):
+            ok = _as_bool(rec.get(key))
+            if rec.get(key) is not None:
+                break
+    if ok is None:
+        ok = False
+    reward = _coerce_float(rec.get("reward"))
+    return {"type": typ, "cost": float(cost), "success": bool(ok), "reward": reward}
+
 PRIOR_OUT = {"coding": 450, "data_analysis": 250, "math": 150, "search": 250}
 PRIOR_P = {"coding": 0.55, "data_analysis": 0.7, "math": 0.8, "search": 0.7}
 SYSTEM_TOKENS = 70  # our own tiny system prompt
 RETRY_FACTOR = 1.3  # expected extra cost of the (at most one) retry
 
 
-def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
-    """Load historical JSONL telemetry and aggregate by task type.
-
-    Expected record shape: {"type": "math", "cost": 120.0, "success": true}.
-    Records with missing or malformed values are ignored.
-    """
+def load_trajectory_stats_from_rows(rows) -> dict:
+    """Aggregate task telemetry from an iterable of JSON/dict records."""
     stats = {}
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                typ = str(rec.get("type") or "").strip()
-                if not typ:
-                    continue
-                cost = rec.get("cost")
-                try:
-                    cost_value = float(cost)
-                except (TypeError, ValueError):
-                    continue
-                if cost_value <= 0:
-                    continue
-                bucket = stats.setdefault(typ, {"costs": [], "successes": 0, "count": 0})
-                bucket["costs"].append(cost_value)
-                bucket["count"] += 1
-                ok = rec.get("success")
-                if ok is True or str(ok).lower() in {"true", "1", "yes"}:
-                    bucket["successes"] += 1
-    except OSError:
-        return stats
+    for rec in rows:
+        item = _normalize_record(rec)
+        if item is None:
+            continue
+        typ = item["type"]
+        bucket = stats.setdefault(typ, {"costs": [], "successes": 0, "count": 0})
+        bucket["costs"].append(item["cost"])
+        bucket["count"] += 1
+        if item["success"]:
+            bucket["successes"] += 1
 
     out = {}
     for typ, bucket in stats.items():
@@ -59,8 +146,6 @@ def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
         count = bucket["count"]
         if not costs or count == 0:
             continue
-        # p90 is the conservative tail: one expensive task must not hide behind
-        # a pile of cheap ones when we reserve budget for it.
         p90 = costs[min(len(costs) - 1, int(round(0.9 * (len(costs) - 1))))]
         out[typ] = {
             "avg_cost": sum(costs) / len(costs),
@@ -69,6 +154,29 @@ def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
             "count": count,
         }
     return out
+
+
+def load_trajectory_stats(path: str | os.PathLike[str]) -> dict:
+    """Load historical JSONL telemetry and aggregate by task type.
+
+    Accepted shapes include both task-level events: {"type": "math", "cost": 120.0,
+    "success": true} and mixed runtime rows emitted by the client or runner.
+    Records with missing or malformed values are ignored.
+    """
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return {}
+    return load_trajectory_stats_from_rows(rows)
 
 
 def load_planner_stats(path: str | os.PathLike[str] | None = None) -> dict:

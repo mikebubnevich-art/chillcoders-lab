@@ -114,6 +114,19 @@ class LLMClient:
         self.oj_error = None
         self._oj_fail_streak = 0
         self._transport_logged = None
+        self._provider_health = {"openjiuwen": "healthy", "urllib": "healthy"}
+        self._provider_backoff_until = 0.0
+
+    def _provider_backoff(self, provider: str, transient: bool):
+        if not transient:
+            return
+        self._provider_health[provider] = "degraded"
+        self._oj_fail_streak = max(self._oj_fail_streak, 1 if provider == "openjiuwen" else 0)
+        backoff = min(30.0, 2.0 ** max(0, self._oj_fail_streak - 1))
+        self._provider_backoff_until = max(self._provider_backoff_until, time.time() + backoff)
+
+    def _provider_ok(self) -> bool:
+        return time.time() >= self._provider_backoff_until
 
     def _log(self, rec: dict) -> None:
         if not self.traj_path:
@@ -140,6 +153,8 @@ class LLMClient:
         rem = self._remaining()
         if rem is not None and rem <= 5:
             raise RuntimeError("deadline exceeded")
+        if not self._provider_ok():
+            raise RuntimeError("provider backoff active")
         in_est = sum(est_tokens(m["content"]) + 4 for m in messages)
         worst = in_est / 10.0 + max_tokens
         if worst > meter.room():
@@ -179,7 +194,10 @@ class LLMClient:
                             self.oj_error = msg
                             err = f"openjiuwen: {msg}"
                             if _transient(msg):
-                                # A busy proxy must not disable the adapter.
+                                # A busy proxy must not disable the adapter, but it
+                                # must trigger a cooling window so the next attempt does
+                                # not hammer the same provider with repeated retries.
+                                self._provider_backoff("openjiuwen", True)
                                 self._limiter.penalize()
                                 self._oj_fail_streak += 1
                                 if self._oj_fail_streak >= 3:
@@ -187,6 +205,7 @@ class LLMClient:
                                     self.oj_enabled = False
                                     err += " (disabled after 3 transient failures)"
                             else:
+                                self._provider_backoff("openjiuwen", False)
                                 oj = False
                                 self.oj_enabled = False
                                 err += " (adapter disabled)"
@@ -213,15 +232,21 @@ class LLMClient:
                     except urllib.error.HTTPError as e:
                         err = f"HTTP {e.code}"
                         if e.code == 429:
+                            self._provider_backoff("urllib", True)
                             self._limiter.penalize()
                             ra = e.headers.get("Retry-After") if e.headers else None
                             try:
                                 retry_after = max(0.0, float(ra))
                             except (TypeError, ValueError):
                                 retry_after = 0.0
-                        elif e.code not in (500, 502, 503, 504):
+                        elif e.code in (500, 502, 503, 504):
+                            self._provider_backoff("urllib", True)
+                            retry_after = 1.0
+                        else:
+                            self._provider_backoff("urllib", False)
                             break
                     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                        self._provider_backoff("urllib", True)
                         err = repr(e)
                 finally:
                     self._limiter.release()

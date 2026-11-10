@@ -1,5 +1,21 @@
 # IMPLEMENTATION_ROADMAP
 
+## 0. Repository gate for GitHub
+
+Что должно идти в основной репозиторий:
+- `project/` — production harness, planner, budget, routes, solvers
+- `docs/` — architecture, audit, roadmap and public project map
+- public setup and usage docs without secrets or local run artifacts
+
+Что не должно попадать в GitHub как часть source-of-truth:
+- `benchmarks/` results, probe output, local metrics
+- `config/` runtime overrides and machine-specific locked settings
+- `generated_tasks/`, task copies, temp workspaces, `answer.txt` artifacts
+- `scripts/` ad hoc local validation scripts
+- any `.env`, keys, logs, or runtime-only files
+
+Решение: keep the product code and design docs in GitHub; keep the empirical tuning and local run state outside Git.
+
 ## 1. Цель архитектуры
 
 Итоговая архитектура должна быть не “агентный монолит”, а экономичная соревновательная система с чётким разделением ответственности:
@@ -331,6 +347,12 @@
 
 ## 3. Приоритетная последовательность работ
 
+### Текущее состояние (обновлено по реальным данным)
+
+- Порядок 1: policy consolidation — частично стабилизирован; unit routing и planner policy уже используются в рабочем потоке.
+- Порядок 2: empirical cost calibration — завершён на основе реального 18-task benchmark run: собраны `avg_cost`, `success_rate`, `reward` по типам задач, обновлён локальный профиль [`config/planner_profiles.json`](../config/planner_profiles.json).
+- Следующий активный шаг: Порядок 3 — harden openJiuwen + budget behaviour. Идёт усиление глобального контроля бюджета и устойчивости провайдера перед следующим реальным прогоном.
+
 ### Порядок 1: policy consolidation
 
 Проблема: LLM-routing logic is spread across too many files.
@@ -365,7 +387,12 @@
 Что делать:
 - live proxy test matrix;
 - 429, timeout and 5xx handling;
-- verify fallback behaviour with real provider behaviour.
+- verify fallback behaviour with real provider behaviour;
+- add provider-level cooldowns and deterministic backoff so retries do not hammer the same failing endpoint.
+
+Текущее состояние: активный этап. Обновлён runtime-контроль для черезмерного
+повторения запросов после transient ошибок, а также устранена возможность
+удерживать локальный task cap при почти исчерпанном глобальном бюджете.
 
 Зависимости:
 - requires stable LLM layer.
@@ -379,7 +406,12 @@
 Что делать:
 - expand math/data/search solver coverage;
 - improve `UNSUPPORTED` detection;
-- reject tasks as `UNSOLVABLE` earlier.
+- reject tasks as `UNSOLVABLE` earlier;
+- cover common deterministic file-inspection and partition logic cases before any final model lock.
+
+Текущее состояние: активный этап на стороне локальных решателей: расширяются
+простые но частые шаблоны над файлами с числовыми рядами, агрегациями и
+доказуемо невозможными логическими разбиениями.
 
 Зависимости:
 - needed before final run to maximize reward per token.
@@ -395,6 +427,16 @@
 - real task sample benchmark
 - final choose of `MODEL`, `MODEL_CODING`, `CODING_STRATEGY`
 - freeze config for final competition run.
+
+Текущее состояние: benchmark validation запущен в проектном окружении.
+Проверка на фактическом runtime (`.venv`) завершилась успешно на 25 задачах:
+- 25/25 success;
+- 0 failures;
+- general benchmark summary saved to [`benchmarks/results/benchmark_report_20261110_235624.json`](../benchmarks/results/benchmark_report_20261110_235624.json).
+
+Это даёт нам рабочую контрольную точку, но benchmark script и harness are not identical:
+мы используем этот прогон для проверки модели и реального рантайма, а затем
+переводим это в окончательный lock / tuning на основе уже собранных harness data.
 
 Зависимости:
 - after stability and logging checks.

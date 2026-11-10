@@ -54,10 +54,18 @@ class Budget:
 
 
 class TaskMeter:
-    """Per-task cap on top of the global budget (1.5-2x of the estimate later)."""
+    """Per-task cap on top of the global budget.
+
+    The task cap is a local ceiling, but it must never exceed the truly free
+    global budget after reservations are included. Otherwise a worker can keep
+    reserving in a task-local lane even while the shared pool is already near
+    exhaustion.
+    """
 
     def __init__(self, budget: Budget, cap: float):
         self.budget, self.cap, self.spent = budget, float(cap), 0.0
 
     def room(self) -> float:
-        return self.cap - self.spent  # global limit is enforced (with waiting) by Budget.reserve
+        global_room = max(0.0, self.budget.total - self.budget.spent - self.budget.reserved)
+        task_room = max(0.0, self.cap - self.spent)
+        return min(task_room, global_room)

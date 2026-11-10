@@ -30,9 +30,19 @@ jiuwenswarm/
 **/runs/
 **/*.local
 local-results/
+config/
+benchmarks/
+experiments/
+scripts/
+execution_log.txt
+instructions_run_benchmark.md
+generated_tasks/
+generated_tasks_llm_probe/
 project/tests/results/
 task-dir/**/answer.txt
 task-dir/**/workspace/answer.txt
+task-dir/**/mylib.py
+task-dir/**/workspace/*.py
 
 # OS files
 .DS_Store

@@ -17,7 +17,10 @@ SYN = {
     "born": ["born", "birth", "birthplace", "date of birth"],
     "founded": ["founded", "establishment", "established", "foundation year"],
     "founder": ["founder", "founders", "co-founder", "founded by", "who founded", "started by"],
-    "employer": ["employer", "works for", "work for", "works at", "work at", "worked for", "employed by"],
+    "employer": [
+        "employer", "works for", "work for", "works at", "work at",
+        "worked for", "employed by", "company where"
+    ],
     "mentor": ["mentor", "mentored"],
     "ceo": ["ceo", "chief executive", "chief executive officer", "led by", "run by"],
     "author": ["author", "written by", "wrote", "writer"],
@@ -84,6 +87,30 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+def _canonical_field(key: str):
+    group = {
+        "headquarters": "location",
+        "location": "location",
+        "capital": "location",
+        "country": "country",
+        "nationality": "country",
+        "citizen of": "country",
+        "born": "born",
+        "birthplace": "born",
+        "founded": "founded",
+        "established": "founded",
+        "founder": "founder",
+        "employer": "employer",
+        "mentor": "mentor",
+        "ceo": "ceo",
+        "author": "author",
+        "spouse": "spouse",
+        "parent": "parent",
+        "director": "director",
+    }
+    return group.get(key, key)
+
+
 def solve(instruction: str, task_dir: str):
     kb = os.path.join(task_dir, "kb")
     if not os.path.isdir(kb):
@@ -112,7 +139,20 @@ def solve(instruction: str, task_dir: str):
         return UNSOLVABLE
     ent = by_norm[ent_norm][0]
     keys = _field_keys(ents)
-    mentioned = [k for k in keys if any(re.search(rf"\b{re.escape(s)}\b", low) for s in SYN.get(k, [k]))]
+    matched = {}
+    for key in keys:
+        score = 0
+        for syn in SYN.get(key, [key]):
+            pattern = rf"(?<![A-Za-z0-9]){re.escape(syn)}(?![A-Za-z0-9])"
+            if re.search(pattern, low):
+                score += 2
+        if score:
+            canonical = _canonical_field(key)
+            prev = matched.get(canonical)
+            current = (score, {"headquarters": 3, "location": 2, "born": 3, "founded": 3}.get(key, 1), key)
+            if prev is None or current > prev:
+                matched[canonical] = current
+    mentioned = [key for _, _, key in sorted(matched.values(), key=lambda x: (-x[0], -x[1], x[2]))]
     # 'city' only matters together with headquarters; drop fields that are just the entity's own words
     link = [k for k in mentioned if any(v in ents for e in ents.values() for kk, v in e.items() if kk == k)]
     terminal = [k for k in mentioned if k not in link]

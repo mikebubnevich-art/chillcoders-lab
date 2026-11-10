@@ -118,6 +118,37 @@ def solve(instruction: str, task_dir: str):
                 "greater than": lambda x: x > v, "at most": lambda x: x <= v,
                 "fewer than": lambda x: x < v, "less than": lambda x: x < v}[word]
         sel = [x for x in sel if _num(x[col]) is not None and keep(_num(x[col]))]
+
+    # Generic column comparisons: "units > 10", "price <= 8", "price between 7 and 10"
+    for c in numeric:
+        cname = c.lower()
+        for pat, pred in [
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:>=|>)\s*(\d+(?:\.\d+)?)\b", lambda v, n: v >= float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:<=|<)\s*(\d+(?:\.\d+)?)\b", lambda v, n: v <= float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:greater\s+than|more\s+than|above)\s*(\d+(?:\.\d+)?)\b",
+             lambda v, n: v > float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:less\s+than|fewer\s+than|below)\s*(\d+(?:\.\d+)?)\b",
+             lambda v, n: v < float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:at\s+least|no\s+less\s+than)\s*(\d+(?:\.\d+)?)\b",
+             lambda v, n: v >= float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*(?:at\s+most|no\s+more\s+than|up\s+to)\s*(\d+(?:\.\d+)?)\b",
+             lambda v, n: v <= float(n)),
+            (rf"\b{re.escape(cname)}\s*(?:is|are)?\s*between\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\b",
+             lambda v, a, b: float(a) <= v <= float(b)),
+            (rf"\b(?:greater\s+than|more\s+than|above)\s*(\d+(?:\.\d+)?)\s+{re.escape(cname)}\b",
+             lambda v, n: v > float(n)),
+            (rf"\b(?:less\s+than|fewer\s+than|below)\s*(\d+(?:\.\d+)?)\s+{re.escape(cname)}\b",
+             lambda v, n: v < float(n)),
+            (rf"\b(?:from|between)\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s+{re.escape(cname)}\b",
+             lambda v, a, b: float(a) <= v <= float(b)),
+        ]:
+            for m in re.finditer(pat, low):
+                if len(m.groups()) == 1:
+                    n = float(m.group(1))
+                    sel = [x for x in sel if _num(x[c]) is not None and pred(_num(x[c]), n)]
+                else:
+                    a, b = m.group(1), m.group(2)
+                    sel = [x for x in sel if _num(x[c]) is not None and pred(_num(x[c]), a, b)]
     # month / numeric range filters ("months 7 through 8", "month 3", "months 2-4")
     for c in numeric:
         cn = re.escape(c.lower())

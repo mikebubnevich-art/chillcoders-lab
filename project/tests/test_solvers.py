@@ -1,7 +1,7 @@
 import csv, os, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from solvers import UNSOLVABLE, code_solver, data_solver, math_solver, search_solver, try_solve
+from solvers import UNSOLVABLE, code_solver, data_solver, logic_solver, math_solver, search_solver, shell_solver, try_solve
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures/tasks")
 PRE = "The file sales.csv has columns order_id,region,product,month,units,price (20 rows). "
@@ -169,6 +169,7 @@ class SearchSynonyms(unittest.TestCase):
     def test_where_located(self):
         self.assertEqual(self.s("In which city is Ada Lovelace's employer located?"), "London")
         self.assertEqual(self.s("Where is Analytical Engine Ltd headquartered?"), "London")
+        self.assertEqual(self.s("Which city is the company where Ada Lovelace works based in?"), "London")
 
     def test_works_at(self):
         self.assertEqual(self.s("Which company does Ada Lovelace work at?"), "Analytical Engine Ltd")
@@ -428,6 +429,69 @@ class Data2(unittest.TestCase):
         self.assertEqual(data_solver.solve(q, self.d), UNSOLVABLE)
 
 
+class ShellDeterministicRegression(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="shell_reg_")
+        with open(os.path.join(self.d, "data.txt"), "w", encoding="utf-8") as f:
+            f.write("1\n2\n3\n4\n5\n6\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_even_filter_is_respected_for_average(self):
+        q = "What is the average of the even numbers in data.txt?"
+        self.assertEqual(shell_solver.solve(q, self.d), "4")
+
+    def test_odd_filter_is_respected_for_median(self):
+        q = "What is the median of the odd numbers in data.txt?"
+        self.assertEqual(shell_solver.solve(q, self.d), "3")
+
+    def test_threshold_filter_is_respected_for_sum(self):
+        q = "What is the sum of numbers greater than 3 in data.txt?"
+        self.assertEqual(shell_solver.solve(q, self.d), "15")
+
+
+class LogicDeterministicRegression(unittest.TestCase):
+    def test_partition_exceeds_total_is_unsolvable(self):
+        q = "There are 10 fruits. 4 are apples and 3 are oranges. The rest are pears. There are 4 pears."
+        self.assertEqual(logic_solver.solve(q, ""), UNSOLVABLE)
+
+    def test_no_other_and_missing_remaining_is_unsolvable(self):
+        q = "There are 10 fruits. 4 are apples and 3 are oranges. No other fruits exist."
+        self.assertEqual(logic_solver.solve(q, ""), UNSOLVABLE)
+
+    def test_remaining_can_close_the_total(self):
+        q = "There are 10 fruits. 4 are apples and 3 are oranges. The rest are pears. The rest are 3."
+        self.assertIsNone(logic_solver.solve(q, ""))
+
+
+class DataComparisonFilters(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="data_filters_")
+        with open(os.path.join(self.d, "sales.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["order_id", "region", "product", "month", "units", "price"])
+            w.writerows([
+                [1, "east", "widget", 1, 12, 10],
+                [2, "east", "widget", 2, 8, 10],
+                [3, "west", "gadget", 1, 14, 7],
+                [4, "east", "widget", 2, 11, 8],
+            ])
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_numeric_columns_support_generic_greater_than_and_between(self):
+        q = "The file sales.csv has columns order_id,region,product,month,units,price (4 rows). How many rows have units greater than 10? Work only inside the current directory."
+        self.assertEqual(data_solver.solve(q, self.d), "3")
+        q2 = "The file sales.csv has columns order_id,region,product,month,units,price (4 rows). How many rows have price between 7 and 10? Work only inside the current directory."
+        self.assertEqual(data_solver.solve(q2, self.d), "4")
+
+    def test_numeric_columns_support_generic_less_than_and_sum(self):
+        q = "The file sales.csv has columns order_id,region,product,month,units,price (4 rows). What is the sum of price for rows where price <= 8? Work only inside the current directory."
+        self.assertEqual(data_solver.solve(q, self.d), "23")
+
+
 class SearchProse(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="kb_prose_")
@@ -446,6 +510,14 @@ class SearchProse(unittest.TestCase):
 
     def test_title_fact_from_prose(self):
         self.assertEqual(search_solver.solve("When was Cedarline Systems founded?", self.d), "2004")
+
+    def test_based_in_phrase_is_not_treated_as_two_fields(self):
+        kb = os.path.join(self.d, "kb")
+        with open(os.path.join(kb, "alice_smith.md"), "w", encoding="utf-8") as f:
+            f.write("# Alice Smith\nEmployer: Nova Labs\n")
+        with open(os.path.join(kb, "nova_labs.md"), "w", encoding="utf-8") as f:
+            f.write("# Nova Labs\nHeadquarters: Osaka\n")
+        self.assertEqual(search_solver.solve("Which city is the company where Alice Smith works based in?", self.d), "Osaka")
 
 
 class ShadowRegressions(unittest.TestCase):

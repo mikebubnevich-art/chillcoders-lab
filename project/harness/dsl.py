@@ -16,6 +16,7 @@ import csv
 import json
 import os
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
 
 from solvers import search_solver
@@ -170,9 +171,35 @@ def context(task) -> str:
             return _csv_schema(task)
         if t == "search":
             return _kb_schema(task)
+        if t == "math":
+            return _file_preview(task)
         return ""
     except Exception:
         return ""
+
+
+DATA_FILE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w.-]+\.(?:csv|json|tsv|txt))\b")
+
+
+def _file_preview(task, limit=1200) -> str:
+    """Show the small data files a maths plan may need to read a starting value from.
+
+    Without this the plan schema (literal start + literal ops) cannot express
+    "starts with the stock listed in inventory.csv", and models silently guess 0.
+    """
+    instr = task.get("instruction", "")
+    chunks = []
+    for name in dict.fromkeys(DATA_FILE_RE.findall(instr)):
+        path = os.path.join(task.get("dir", ""), name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read(limit)
+        except OSError:
+            continue
+        chunks.append(f"file {name}:\n{text.strip()}")
+    return "\n\n".join(chunks)
 
 
 def spec(task):
@@ -206,10 +233,16 @@ def _parse(text: str) -> dict:
 
 def _fmt(v: float, decimals):
     if decimals is not None:
-        return f"{v:.{decimals}f}"
+        return _half_up(repr(v), decimals)
     if abs(v - round(v)) < 1e-9:
         return str(int(round(v)))
     raise PlanError("non-integer answer without a decimals hint; cannot format")
+
+
+def _half_up(value, decimals: int) -> str:
+    """Round half away from zero on the printed decimal, not half-to-even on the binary float."""
+    q = Decimal(1).scaleb(-decimals)
+    return str(Decimal(value).quantize(q, rounding=ROUND_HALF_UP))
 
 
 def _decimals(instruction: str, plan: dict):
@@ -230,7 +263,7 @@ def _decimals(instruction: str, plan: dict):
 def _fmt_fraction(n: Fraction, instruction: str, plan: dict) -> str:
     decimals = _decimals(instruction, plan)
     if decimals is not None:
-        return f"{float(n):.{decimals}f}"
+        return _half_up(Decimal(n.numerator) / Decimal(n.denominator), decimals)
     if n.denominator == 1:
         return str(n.numerator)
     sign = "-" if n < 0 else ""
@@ -256,6 +289,15 @@ def _fmt_fraction(n: Fraction, instruction: str, plan: dict) -> str:
 def _run_math(task, plan):
     _keys(plan, {"start", "ops", "decimals"}, required=("start", "ops"))
     n = Fraction(_int(plan["start"], "start"))
+    instruction = task.get("instruction", "")
+    if n == 0:
+        # A literal 0 is the classic silent guess when the real start value lives
+        # in a file the plan cannot read: refuse instead of returning a wrong number.
+        files = [f for f in dict.fromkeys(DATA_FILE_RE.findall(instruction))
+                 if os.path.isfile(os.path.join(task.get("dir", ""), f))]
+        if files:
+            raise PlanError("start is 0 but the instruction reads the starting value from "
+                            + ", ".join(files))
     ops = plan["ops"]
     if not isinstance(ops, list) or not ops:
         raise PlanError("ops must be a non-empty list")

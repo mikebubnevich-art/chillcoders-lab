@@ -24,8 +24,22 @@ from harness.triage import triage  # noqa: E402
 
 
 def meta_of(task):
-    with open(os.path.join(task["dir"], "task.json"), encoding="utf-8") as f:
-        return json.load(f)
+    # task.json lives in the task root; `dir` is the workspace the agent works in.
+    for base in (task["dir"], task.get("root", task["dir"])):
+        path = os.path.join(base, "task.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    return {}
+
+
+def correct(meta, answer):
+    """Same convention as tools/model_matrix.is_correct: a coding answer is the marker."""
+    got = str(answer or "").strip()
+    expected = str(meta.get("expected") or "").strip()
+    if meta.get("check") == "unittest" or expected == "tests_pass":
+        return got.upper() in ("DONE", "PASS")
+    return got == expected
 
 
 def run(tasks_dir):
@@ -42,7 +56,7 @@ def run(tasks_dir):
         except Exception as e:  # never let one bad task stop the benchmark
             status, answer = "error", f"{type(e).__name__}: {e}"
         rows.append({"id": t["id"], "type": t["type"], "expected": exp,
-                     "status": status, "answer": answer})
+                     "status": status, "answer": answer, "ok": correct(meta, answer)})
     return rows, time.time() - t0
 
 
@@ -57,7 +71,8 @@ def summarize(rows):
         if not feasible:
             c["infeasible_total"] += 1
             overall["infeasible_total"] += 1
-            if r["status"] == "infeasible":
+            # Two conventions: skip with no answer, or the literal word when asked.
+            if r["status"] == "infeasible" or str(r["answer"] or "").strip() == "UNSOLVABLE":
                 c["infeasible_caught"] += 1
                 overall["infeasible_caught"] += 1
             else:
@@ -69,7 +84,7 @@ def summarize(rows):
         if r["status"] == "solved":
             c["solved"] += 1
             overall["solved"] += 1
-            if r["answer"] == r["expected"]:
+            if r["ok"]:
                 c["correct"] += 1
                 overall["correct"] += 1
             else:
@@ -114,7 +129,7 @@ def main():
         print(f"infeasible caught: {ic:.1%}  false skips: {ov['false_skip']}")
         print(f"time: {sec:.1f}s")
         for r in rows:
-            if r["expected"] is not None and r["status"] == "solved" and r["answer"] != r["expected"]:
+            if r["expected"] is not None and r["status"] == "solved" and not r["ok"]:
                 print(f"WRONG {r['id']}: got {r['answer']!r}, expected {r['expected']!r}")
             elif r["expected"] is not None and r["status"] == "infeasible":
                 print(f"FALSE-SKIP {r['id']}")

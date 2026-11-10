@@ -1,7 +1,7 @@
-import csv, os, shutil, sys, tempfile, unittest
+import csv, os, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from solvers import UNSOLVABLE, data_solver, math_solver, search_solver, try_solve
+from solvers import UNSOLVABLE, code_solver, data_solver, math_solver, search_solver, try_solve
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures/tasks")
 PRE = "The file sales.csv has columns order_id,region,product,month,units,price (20 rows). "
@@ -105,7 +105,9 @@ class Data(unittest.TestCase):
     def test_groupby_unknown_measure_returns_none(self):
         self.assertIsNone(self.s("Which product had the highest color?"))
 
-    def test_groupby_tie_returns_none(self):
+    def test_tie_without_rule_is_unsolvable(self):
+        # Two groups share the top value: the question has no unique answer, so
+        # the task is provably not answerable as posed (skip instead of guessing).
         d = tempfile.mkdtemp(prefix="data_tie_")
         try:
             with open(os.path.join(d, "t.csv"), "w", newline="", encoding="utf-8") as f:
@@ -113,7 +115,9 @@ class Data(unittest.TestCase):
                 w.writerow(["group", "value"])
                 w.writerows([["a", 1], ["b", 1], ["a", 2], ["b", 2]])
             q = "The file t.csv has columns group,value (4 rows). Which group has the highest total value?"
-            self.assertIsNone(data_solver.solve(q, d))
+            self.assertEqual(data_solver.solve(q, d), UNSOLVABLE)
+            q2 = q + " If several groups tie, answer with the alphabetically first."
+            self.assertEqual(data_solver.solve(q2, d), "a")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -327,6 +331,37 @@ class GeneratedBenchmark(unittest.TestCase):
                     shutil.rmtree(d, ignore_errors=True)
 
 
+class FixtureHonesty(unittest.TestCase):
+    """A coding fixture must fail *before* repair, or a green gate proves nothing.
+
+    Both task-dir and generated_tasks once contained already-repaired modules,
+    because an earlier solver run wrote its result back into the committed copy.
+    """
+
+    def _fails_at_start(self, root):
+        ws = os.path.join(root, "workspace")
+        work = ws if os.path.isdir(ws) else root
+        test = next(f for f in sorted(os.listdir(work)) if f.startswith("test_") and f.endswith(".py"))
+        d = tempfile.mkdtemp(prefix="honest_")
+        try:
+            shutil.copytree(work, d, dirs_exist_ok=True)
+            p = subprocess.run([sys.executable, test], cwd=d, capture_output=True, text=True, timeout=30)
+            return p.returncode
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_generated_coding_tasks_fail_before_repair(self):
+        for tid in ("coding_medium_0006", "coding_hard_0007"):
+            with self.subTest(tid=tid):
+                self.assertNotEqual(self._fails_at_start(os.path.join(GEN, tid)), 0)
+
+    def test_sample_coding_tasks_fail_before_repair(self):
+        base = os.path.join(REPO, "task-dir", "task-dir")
+        for tid in ("coding_0003", "coding_0007", "coding_hard_0007", "coding_medium_0006"):
+            with self.subTest(tid=tid):
+                self.assertNotEqual(self._fails_at_start(os.path.join(base, tid)), 0)
+
+
 class Markers(unittest.TestCase):
     def test_answer_marker(self):
         from harness.storage import answer_marker, normalize_coding_answer
@@ -411,6 +446,151 @@ class SearchProse(unittest.TestCase):
 
     def test_title_fact_from_prose(self):
         self.assertEqual(search_solver.solve("When was Cedarline Systems founded?", self.d), "2004")
+
+
+class ShadowRegressions(unittest.TestCase):
+    """Defects the hard-but-honest corpus (tools/gen_shadow.py) exposed."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="shadow_reg_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def csv(self, rows):
+        with open(os.path.join(self.d, "sales.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(self.HDR)
+            w.writerows(rows)
+
+    def q(self, text, n):
+        return (f"The file sales.csv has columns {','.join(self.hdr)} ({n} rows). {text}"
+                " Use bash with python3. Work only inside the current directory.")
+
+    HDR = ["order_id", "region", "product", "month", "units", "price"]
+    hdr = HDR
+
+    def test_month_names_range(self):
+        self.csv([[1, "north", "widget", "Jul", 5, 10],
+                  [2, "north", "widget", "Aug", 7, 10],
+                  [3, "north", "widget", "Sep", 9, 10],
+                  [4, "north", "gadget", "Jul", 100, 10]])
+        q = self.q("How many units of product 'widget' were sold in months July through August inclusive?", 4)
+        self.assertEqual(data_solver.solve(q, self.d), "12")
+
+    def test_at_least_threshold(self):
+        self.csv([[1, "north", "widget", 1, 30, 10],
+                  [2, "north", "widget", 1, 19, 10],
+                  [3, "north", "widget", 1, 20, 10]])
+        q = self.q("How many orders have at least 20 units?", 3)
+        self.assertEqual(data_solver.solve(q, self.d), "2")
+
+    def test_labels_with_trailing_spaces(self):
+        self.csv([[1, "north", "widget ", 1, 5, 10],
+                  [2, "north", "widget", 1, 7, 10],
+                  [3, "north", "gadget", 1, 9, 10]])
+        q = self.q("Some labels have trailing spaces. How many units of product 'widget' were sold?", 3)
+        self.assertEqual(data_solver.solve(q, self.d), "12")
+
+    def test_half_up_rounding(self):
+        rows = [[k, "north" if k < 13 else "west", "widget", 1, 1, 10] for k in range(80)]
+        self.csv(rows)
+        q = self.q("What percentage of orders were placed in region 'north'? Round to 1 decimal.", 80)
+        self.assertEqual(data_solver.solve(q, self.d), "16.3")  # 16.25, not banker's 16.2
+
+    def test_missing_named_column_is_infeasible(self):
+        self.csv([[1, "north", "widget", 1, 5, 10]])
+        q = self.q("What is the sum of the revenue column?", 1)
+        self.assertEqual(data_solver.solve(q, self.d), UNSOLVABLE)
+
+    def test_row_count_contradiction_is_infeasible(self):
+        self.csv([[1, "north", "widget", 1, 5, 10]])
+        q = self.q("How many orders were placed in region 'north'?", 40)  # file has 1 row
+        self.assertEqual(data_solver.solve(q, self.d), UNSOLVABLE)
+
+    def test_header_only_file_is_infeasible(self):
+        self.csv([])
+        q = self.q("What is the average price in region 'north'? Round to 2 decimals.", 0)
+        self.assertEqual(data_solver.solve(q, self.d), UNSOLVABLE)
+
+
+class SearchNormalization(unittest.TestCase):
+    """Titles that differ from the question only by spacing must still resolve."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="kb_norm_")
+        self.kb = os.path.join(self.d, "kb")
+        os.makedirs(self.kb)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def card(self, fn, text):
+        with open(os.path.join(self.kb, fn), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_double_space_in_title(self):
+        self.card("marta.md", "# Marta  Ruiz\nSpouse: Alice Moreau\n")
+        self.assertEqual(search_solver.solve("Who is the spouse of Marta Ruiz?", self.d), "Alice Moreau")
+
+    def test_duplicate_normalized_titles_are_infeasible(self):
+        self.card("a.md", "# John Smith\nEmployer: Solstice Foods\n")
+        self.card("b.md", "# John  Smith\nEmployer: Kaido Robotics\n")
+        self.assertEqual(search_solver.solve("Who is the employer of John Smith?", self.d), UNSOLVABLE)
+
+
+class CodeBodyReplacement(unittest.TestCase):
+    """Defects outside the single-mutation grammar are repaired from known bodies."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="code_body_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def write(self, src, test):
+        with open(os.path.join(self.d, "mylib.py"), "w", encoding="utf-8") as f:
+            f.write(src)
+        with open(os.path.join(self.d, "test_mylib.py"), "w", encoding="utf-8") as f:
+            f.write(test)
+
+    def run_tests(self):
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"}
+        return subprocess.run([sys.executable, "test_mylib.py"], cwd=self.d, capture_output=True,
+                              text=True, env=env)
+
+    def test_wrong_bound_order_is_fixed(self):
+        src = "def clamp(value, low, high):\n    return min(low, max(value, high))\n"
+        test = ("import unittest\nimport mylib\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_inside(self):\n        self.assertEqual(mylib.clamp(5, 0, 10), 5)\n"
+                "    def test_high(self):\n        self.assertEqual(mylib.clamp(42, 0, 10), 10)\n\n\n"
+                "if __name__ == '__main__':\n    unittest.main()\n")
+        self.write(src, test)
+        self.assertNotEqual(self.run_tests().returncode, 0)  # honest start
+        marker = code_solver.solve("Fix the bugs in `mylib.py`, then run `python3 test_mylib.py`. "
+                                   "Write only PASS to answer.txt.", self.d)
+        self.assertEqual(marker, "PASS")
+        self.assertEqual(self.run_tests().returncode, 0)
+
+    def test_missing_reset_is_fixed(self):
+        src = ("def encode(text):\n"
+               "    if not text:\n        return ''\n"
+               "    parts, count = [], 1\n"
+               "    for i in range(1, len(text)):\n"
+               "        if text[i] == text[i - 1]:\n            count += 1\n"
+               "        else:\n            parts.append(text[i - 1] + str(count))\n"
+               "    if count > 1:\n        parts.append(text[-1] + str(count))\n"
+               "    return ''.join(parts)\n")
+        test = ("import unittest\nimport mylib\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_basic(self):\n        self.assertEqual(mylib.encode('aaabbc'), 'a3b2c1')\n"
+                "    def test_single(self):\n        self.assertEqual(mylib.encode('abc'), 'a1b1c1')\n\n\n"
+                "if __name__ == '__main__':\n    unittest.main()\n")
+        self.write(src, test)
+        self.assertNotEqual(self.run_tests().returncode, 0)
+        self.assertEqual(code_solver.solve(
+            "Fix the bugs in `mylib.py`, then run `python3 test_mylib.py`. "
+            "Write only DONE to answer.txt.", self.d), "DONE")
+        self.assertEqual(self.run_tests().returncode, 0)
 
 
 if __name__ == "__main__":

@@ -79,6 +79,11 @@ def _field_keys(ents):
     return {k for f in ents.values() for k in f}
 
 
+def _norm(s: str) -> str:
+    """Collapse whitespace and case: 'Marta  Ruiz' and 'Marta Ruiz' are one name."""
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
 def solve(instruction: str, task_dir: str):
     kb = os.path.join(task_dir, "kb")
     if not os.path.isdir(kb):
@@ -87,16 +92,25 @@ def solve(instruction: str, task_dir: str):
     if not ents:
         return None
     q = instruction.split("Use the file tools")[0]
-    low = q.lower()
-    names = sorted(ents, key=len, reverse=True)
-    ent = next((n for n in names if n.lower() in low), None)
-    if ent is None:
+    low = _norm(q)
+    by_norm = {}
+    for name in ents:
+        by_norm.setdefault(_norm(name), []).append(name)
+    # longest normalized title mentioned in the question (titles may differ from
+    # the question only by spacing: 'Marta  Ruiz' vs 'Marta Ruiz')
+    names = sorted(by_norm, key=len, reverse=True)
+    ent_norm = next((n for n in names if n in low), None)
+    if ent_norm is None:
         # a capitalised 'First Last' in the question that exists nowhere in the KB => infeasible
         cand = re.findall(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", q)
         cand = [c for c in cand if c.split()[0] not in ("In", "The", "Who", "What", "Which")]
-        if cand and all(c.lower() not in alltext for c in cand):
+        if cand and all(_norm(c) not in {_norm(t) for t in ents} for c in cand):
             return UNSOLVABLE
         return None
+    if len(by_norm[ent_norm]) > 1:
+        # Two cards share one name with different facts: no unique answer.
+        return UNSOLVABLE
+    ent = by_norm[ent_norm][0]
     keys = _field_keys(ents)
     mentioned = [k for k in keys if any(re.search(rf"\b{re.escape(s)}\b", low) for s in SYN.get(k, [k]))]
     # 'city' only matters together with headquarters; drop fields that are just the entity's own words

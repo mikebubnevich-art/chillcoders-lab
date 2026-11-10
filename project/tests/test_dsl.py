@@ -223,5 +223,50 @@ class Specs(unittest.TestCase):
         self.assertEqual(s.context, "")
 
 
+class HalfUpAndFileStart(unittest.TestCase):
+    """Shared-bug fixes found by the two-model plan experiment (tools/consensus_probe.py)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="dsl_edge_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_percent_rounds_half_up(self):
+        # 13/80 = 16.25% exactly: the printed answer must be 16.3, not banker's 16.2.
+        with open(os.path.join(self.d, "sales.csv"), "w", encoding="utf-8") as f:
+            f.write("order_id,region,units\n")
+            for k in range(80):
+                f.write(f"{k},{'north' if k < 13 else 'west'},1\n")
+        t = {"type": "data_analysis", "dir": self.d,
+             "instruction": "The file sales.csv has columns order_id,region,units (80 rows). "
+                            "What percentage of orders were placed in region 'north'? Round to 1 decimal."}
+        p = {"filters": [{"col": "region", "op": "eq", "value": "north"}], "agg": "percent", "decimals": 1}
+        self.assertEqual(dsl.execute(t, plan(p)), ("16.3", None))
+
+    def test_math_context_shows_the_data_file(self):
+        with open(os.path.join(self.d, "inventory.csv"), "w", encoding="utf-8") as f:
+            f.write("item,stock\nbolts,907\nnuts,120\n")
+        t = {"type": "math", "dir": self.d,
+             "instruction": "A warehouse starts with the number of bolts listed in inventory.csv "
+                            "(column item,stock). It ships out 2 orders of 30 bolts each. "
+                            "How many bolts are left?"}
+        ctx = dsl.spec(t).context
+        self.assertIn("inventory.csv", ctx)
+        self.assertIn("907", ctx)
+
+    def test_math_rejects_guessed_zero_start_when_a_file_is_read(self):
+        with open(os.path.join(self.d, "inventory.csv"), "w", encoding="utf-8") as f:
+            f.write("item,stock\nbolts,907\n")
+        t = {"type": "math", "dir": self.d,
+             "instruction": "A warehouse starts with the number of bolts listed in inventory.csv. "
+                            "It ships out 2 orders of 30 bolts each. How many bolts are left?"}
+        ans, err = dsl.execute(t, plan({"start": 0, "ops": [{"op": "sub", "amount": 30, "times": 2}]}))
+        self.assertIsNone(ans)
+        self.assertIn("start is 0", err)
+        self.assertEqual(dsl.execute(t, plan({"start": 907, "ops": [{"op": "sub", "amount": 30, "times": 2}]})),
+                         ("847", None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

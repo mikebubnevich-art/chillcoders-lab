@@ -29,6 +29,8 @@ SYSTEM = (
     '"new":"<replacement text>"}]}\n'
     "- Every \"old\" must appear EXACTLY ONCE in its file; copy it verbatim, including indentation.\n"
     "- Do not modify test files; they are read-only.\n"
+    "- Adding NEW code (functions, imports, helpers) to existing module files is allowed when the "
+    "tests need it — only editing the tests is forbidden.\n"
     "- Use several replacements when there are several bugs.\n"
     "- If exact replacements cannot express the fix, reply with a full ```python script instead "
     "(it runs in the task directory and must write answer.txt)."

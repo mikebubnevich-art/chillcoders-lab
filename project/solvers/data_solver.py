@@ -29,6 +29,78 @@ def _num(x):
         return None
 
 
+# currency codes/words that may sit before or after the number
+_CURRENCY = re.compile(
+    r"(?i)\b(usd|eur|gbp|chf|jpy|cny|rub|rur|uah|inr|brl|cad|aud|nzd|sek|nok|dkk|pln|try|ils|"
+    r"dollars?|euros?|pounds?|francs?|rubles?|roubles?|rupees?|yuan|yuan?|kroner?|zloty)\b")
+_SYMBOLS = re.compile(r"[$€£¥₽₹₺\u20bd\u20a4]")
+
+
+def _dec(v):
+    """Robust number detector: turns formatted money/percents into Decimal.
+
+    Handles '$1,204.50', '€1.204,50', '1 204,50', "1'204.50", '1204.50 USD',
+    '₽1204,50', '(1,204.50)' and '-1,204.50' (negative), '20%'. The separator
+    rule: if both ',' and '.' are present, the rightmost one is the decimal
+    separator; a lone separator followed by repeating 3-digit groups is a
+    thousands separator ('1,204' -> 1204, '1.204' -> 1204), otherwise it is
+    decimal ('1,20' -> 1.20, '1204.505' -> 1204.505). Unparsable -> None.
+    """
+    s = str(v).strip()
+    if not s:
+        return None
+    neg = s.startswith("-") or (s.startswith("(") and s.endswith(")"))
+    s = s.strip("()-+").strip()
+    s = s.replace("%", "")
+    s = _CURRENCY.sub(" ", s)
+    s = _SYMBOLS.sub(" ", s)
+    s = s.replace("'", "").replace("\u2019", "").replace("\u00a0", " ")
+    # space grouping must look real: '1 204,50' ok, '1 204 50' is garbage
+    parts = s.split()
+    if len(parts) > 1:
+        if not all(p.isdigit() and len(p) == 3 for p in parts[1:-1]):
+            return None
+        if len(parts) >= 3:
+            # '1 204 505' is 1204505; '1 204 50' is not a real format
+            if not (parts[-1].isdigit() and len(parts[-1]) == 3):
+                return None
+        elif not re.fullmatch(r"\d{1,3}(?:[.,]\d{1,4})?", parts[-1]):
+            return None
+    s = re.sub(r"\s+", "", s)
+    if not re.fullmatch(r"[\d.,]+", s):
+        return None
+    if "," in s and "." in s:
+        decimal_sep = "," if s.rfind(",") > s.rfind(".") else "."
+    elif "," in s:
+        decimal_sep = "" if re.fullmatch(r"\d{1,3}(,\d{3})+", s) else ","
+    elif "." in s:
+        decimal_sep = "" if re.fullmatch(r"\d{1,3}(\.\d{3})+", s) else "."
+    else:
+        decimal_sep = ""
+    if decimal_sep:
+        grouping = {",": ".", ".": ",", "": ""}[decimal_sep]
+        if grouping:
+            s = s.replace(grouping, "")
+        if decimal_sep == ",":
+            s = s.replace(",", ".")
+    else:
+        # the lone separator was a thousands grouping
+        s = s.replace(",", "").replace(".", "")
+    try:
+        d = Decimal(s)
+    except Exception:
+        return None
+    return -d if neg else d
+
+
+def _row_dec(x):
+    """Plain numbers stay exact through float; formatted ones via _dec."""
+    f = _num(x)
+    if f is not None:
+        return Decimal(str(f))
+    return _dec(x)
+
+
 def _fmt(v: float, decimals):
     if decimals is not None:
         # f-strings round the binary value half-to-even (16.25 -> "16.2"); the
@@ -183,12 +255,31 @@ def solve(instruction: str, task_dir: str):
     dm = re.search(r"round(?:ed)?\s+to\s+(\d+)\s+decimal", full_low)
     decimals = int(dm.group(1)) if dm else None
 
-    qty_col = next((c for c in numeric if c.lower() in ("units", "quantity", "qty")), None)
-    price_col = next((c for c in numeric if c.lower() in ("price", "unit_price", "unitprice")), None)
+    qty_col = next((c for c in cols if c.lower() in ("units", "quantity", "qty")), None)
+    price_col = next((c for c in cols if c.lower() in ("price", "unit_price", "unitprice")), None)
+    disc_col = next((c for c in cols if "discount" in c.lower() or c.lower() == "rebate"), None)
     revenue_asked = ("revenue" in low and qty_col and price_col
                      and not re.search(r"\bnot\s+revenue\b|\bsum\s+units\b", low))
     if revenue_asked:
-        return _fmt(sum(_num(x[qty_col]) * _num(x[price_col]) for x in sel), decimals)
+        apply_disc = bool(disc_col) and "discount" in low
+        total = Decimal(0)
+        for x in sel:
+            price = _row_dec(x[price_col])
+            units = _row_dec(x[qty_col])
+            if price is None or units is None:
+                return None
+            row = units * price
+            if apply_disc:
+                raw = str(x.get(disc_col, "")).strip()
+                d = _row_dec(raw) if raw else None
+                if raw and d is None:
+                    return None
+                if d is not None:
+                    row *= (Decimal(100) - d) / 100
+            total += row
+        if decimals is not None:
+            return str(total.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP))
+        return str(int(total)) if total == total.to_integral_value() else None
     if re.search(r"(how many|number of|count of)\s+(orders|rows|records|sales)", low):
         return str(len(sel))
     dm = re.search(r"(?:how many|number of|count of)\s+(?:unique|distinct)\s+([a-z_]+)", low)
@@ -217,7 +308,8 @@ def solve(instruction: str, task_dir: str):
                 if count_mode:
                     v = 1.0
                 elif revenue_mode:
-                    v = _num(x[qty_col]) * _num(x[price_col])
+                    p, q = _row_dec(x[price_col]), _row_dec(x[qty_col])
+                    v = None if (p is None or q is None) else p * q
                 else:
                     v = _num(x[target])
                 if v is not None:

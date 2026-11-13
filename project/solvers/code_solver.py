@@ -333,6 +333,27 @@ def _noneq(src):
     return [n for n in REF if n in ns and not _equivalent(src, [n])]
 
 
+def _tests_need_missing_attr(test_path, mod_file, src, failed):
+    """True when a failing test calls `<module>.<name>` that the module neither
+    defines nor even mentions: under the 'fix the bugs (do not edit the tests)'
+    contract no mutation of existing functions can create it, so the task is
+    provably infeasible."""
+    mod = mod_file.rsplit(".", 1)[0]
+    try:
+        tree = ast.parse(open(test_path, encoding="utf-8").read())
+    except (OSError, SyntaxError):
+        return False
+    missing = set()
+    for f in ast.walk(tree):
+        if isinstance(f, ast.FunctionDef) and f.name in failed:
+            for a in ast.walk(f):
+                if (isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name)
+                        and a.value.id == mod):
+                    missing.add(a.attr)
+    return bool(missing) and all(
+        not re.search(rf"\b{re.escape(n)}\b", src) for n in missing)
+
+
 def solve(instruction: str, task_dir: str, dry_run: bool = False):
     # "python3 -m unittest test_mylib.py" and "python3 test_mylib.py"
     tm = re.search(r"python3?\s+(?:-m\s+(?:unittest|pytest)\s+)?([\w./-]+\.py)", instruction)
@@ -352,6 +373,11 @@ def solve(instruction: str, task_dir: str, dry_run: bool = False):
         mod_path = os.path.join(tmp, mod_file)
         src = orig = open(mod_path, encoding="utf-8").read()
         nfail, failed = _run_tests(tmp, test_file)
+        if nfail and _tests_need_missing_attr(os.path.join(tmp, test_file), mod_file, src, failed):
+            # Tests call <module>.<name> the module never had. The contract
+            # only forbids editing the tests — adding the function to the
+            # module is allowed, so this is NOT infeasible: hand it to the LLM.
+            return None
         # Step 0: whole-body replacement for functions with a known-good body.
         # Cheap and exact: accepted only if the task's own tests get greener.
         while nfail:

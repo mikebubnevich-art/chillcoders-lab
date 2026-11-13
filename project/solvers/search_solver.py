@@ -19,7 +19,7 @@ SYN = {
     "founder": ["founder", "founders", "co-founder", "founded by", "who founded", "started by"],
     "employer": [
         "employer", "works for", "work for", "works at", "work at",
-        "worked for", "employed by", "company where"
+        "worked for", "employed by", "employs", "employ", "company where"
     ],
     "mentor": ["mentor", "mentored"],
     "ceo": ["ceo", "chief executive", "chief executive officer", "led by", "run by"],
@@ -111,6 +111,55 @@ def _canonical_field(key: str):
     return group.get(key, key)
 
 
+def _reverse_clause(q: str):
+    """'...the person who was born in Lyon?' -> ('born', 'Lyon').
+
+    Works on the original case: the value must be a proper noun, so generic
+    phrases ('the founder of X') can never be mistaken for a filter value.
+    """
+    part = re.split(r"\bwho\b", q, maxsplit=1)
+    if len(part) != 2:
+        return None
+    part = part[1].split("?")[0].split(". ")[0]
+    for key, syns in SYN.items():
+        for syn in syns:
+            m = re.search(rf"(?<![A-Za-z0-9]){re.escape(syn)}(?![A-Za-z0-9])", part, re.I)
+            if not m:
+                continue
+            tail = part[m.end():].strip(" ,;")
+            v = re.match(r"(?:in|at|to|by|of)\s+([A-Z][\w'&.-]*(?:\s+[A-Z][\w'&.-]*)*)", tail)
+            if v and not v.group(1).split()[0] in ("The", "This", "It"):
+                return key, v.group(1)
+    return None
+
+
+def _candidates(key, value, ents):
+    """Entities whose canonical field `key` mentions `value` (word match)."""
+    want = _norm(value)
+    pat = rf"(?<![a-z0-9]){re.escape(want)}(?![a-z0-9])"
+    canon = _canonical_field(key)
+    out = []
+    for name, f in ents.items():
+        for kk, vv in f.items():
+            if _canonical_field(kk) == canon and re.search(pat, _norm(str(vv))):
+                out.append(name)
+                break
+    return out
+
+
+def _traverse(start, link, terminal, ents):
+    cur, ok = start, True
+    for k in link:
+        nxt = ents.get(cur, {}).get(k)
+        if nxt is None:
+            return None
+        cur = nxt
+    if terminal:
+        v = ents.get(cur, {}).get(terminal[0])
+        return None if v is None else v
+    return None if cur == start else cur
+
+
 def solve(instruction: str, task_dir: str):
     kb = os.path.join(task_dir, "kb")
     if not os.path.isdir(kb):
@@ -127,13 +176,25 @@ def solve(instruction: str, task_dir: str):
     # the question only by spacing: 'Marta  Ruiz' vs 'Marta Ruiz')
     names = sorted(by_norm, key=len, reverse=True)
     ent_norm = next((n for n in names if n in low), None)
+    reverse_cands = None
+    reverse_key = None
     if ent_norm is None:
-        # a capitalised 'First Last' in the question that exists nowhere in the KB => infeasible
-        cand = re.findall(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", q)
-        cand = [c for c in cand if c.split()[0] not in ("In", "The", "Who", "What", "Which")]
-        if cand and all(_norm(c) not in {_norm(t) for t in ents} for c in cand):
-            return UNSOLVABLE
-        return None
+        # Reverse lookup: no entity is named, the start is described by a field
+        # value ("Which company employs the person who was born in Lyon?").
+        filt = _reverse_clause(q)
+        if filt:
+            reverse_key, reverse_val = filt
+            reverse_cands = _candidates(reverse_key, reverse_val, ents)
+            if not reverse_cands:
+                return UNSOLVABLE  # no such entity in the KB: provably infeasible
+            ent_norm = _norm(reverse_cands[0])
+        else:
+            # a capitalised 'First Last' in the question that exists nowhere in the KB => infeasible
+            cand = re.findall(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", q)
+            cand = [c for c in cand if c.split()[0] not in ("In", "The", "Who", "What", "Which")]
+            if cand and all(_norm(c) not in {_norm(t) for t in ents} for c in cand):
+                return UNSOLVABLE
+            return None
     if len(by_norm[ent_norm]) > 1:
         # Two cards share one name with different facts: no unique answer.
         return UNSOLVABLE
@@ -153,29 +214,22 @@ def solve(instruction: str, task_dir: str):
             if prev is None or current > prev:
                 matched[canonical] = current
     mentioned = [key for _, _, key in sorted(matched.values(), key=lambda x: (-x[0], -x[1], x[2]))]
+    if reverse_key:
+        # the filter field describes the start entity, not the answer
+        # ('... the person who was born in Lyon?' -> born is not the target)
+        mentioned = [k for k in mentioned if _canonical_field(k) != _canonical_field(reverse_key)]
     # 'city' only matters together with headquarters; drop fields that are just the entity's own words
     link = [k for k in mentioned if any(v in ents for e in ents.values() for kk, v in e.items() if kk == k)]
     terminal = [k for k in mentioned if k not in link]
     if len(terminal) > 1 or not (link or terminal):
         return None
+    starts = reverse_cands if reverse_cands is not None else [ent]
     results = set()
-    for perm in itertools.permutations(link):
-        cur, ok = ent, True
-        for k in perm:
-            nxt = ents.get(cur, {}).get(k)
-            if nxt is None:
-                ok = False
-                break
-            cur = nxt
-        if not ok:
-            continue
-        if terminal:
-            v = ents.get(cur, {}).get(terminal[0])
-            if v is None:
-                continue
-            results.add(v)
-        elif cur != ent:
-            results.add(cur)
+    for start in starts:
+        for perm in itertools.permutations(link):
+            v = _traverse(start, perm, terminal, ents)
+            if v is not None:
+                results.add(v)
     if len(results) == 1:
         return results.pop()
     return None

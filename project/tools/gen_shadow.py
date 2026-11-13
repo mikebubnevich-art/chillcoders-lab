@@ -27,6 +27,7 @@ import csv
 import json
 import os
 import random
+import re
 import shutil
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -73,21 +74,85 @@ def _parse_money(v: str) -> Decimal:
     return Decimal(str(v).replace("$", "").replace(",", "").strip() or "0")
 
 
+_PRICE_STYLES = ["usd", "usd_word", "eur", "eu_space", "ch", "rub"]
+
+
+def _eu(price: Decimal) -> str:
+    """1204.50 -> '1.204,50' (dot groups, comma decimals)."""
+    intpart, _, frac = f"{price:.2f}".partition(".")
+    return f"{int(intpart):,}".replace(",", ".") + "," + frac
+
+
+def _fmt_price(price: Decimal, style: str) -> str:
+    if style == "usd":
+        return "$" + f"{price:,.2f}"
+    if style == "usd_word":
+        return f"{price:.2f} USD"
+    if style == "eur":
+        return "\u20ac" + _eu(price)
+    if style == "eu_space":
+        return _eu(price).replace(".", " ")
+    if style == "ch":
+        return f"{price:,.2f}".replace(",", "'")
+    if style == "rub":
+        return "\u20bd" + _eu(price)
+    raise ValueError(style)
+
+
+def _parse_money_any(v):
+    """Independent (from the solver) reader of the money formats the corpus
+    emits: '$1,204.50', '\u20ac1.204,50', '1 204,50', "1'204.50", '1204.50 USD',
+    '\u20bd1204,50', '20%'. Same separator rules: the rightmost of ','/'.' is
+    the decimal separator; a lone separator with 3-digit groups is grouping."""
+    s = str(v).strip()
+    if not s:
+        return Decimal(0)
+    neg = s.startswith("-") or (s.startswith("(") and s.endswith(")"))
+    for ch in "$\u20ac\u00a3\u00a5\u20bd\u20b9\u20ba()+\u2019'\u00a0":
+        s = s.replace(ch, " ")
+    s = re.sub(r"(?i)\b(usd|eur|gbp|chf|rub|rur|dollars?|euros?|pounds?|rubles?|francs?)\b", " ", s)
+    s = re.sub(r"[\s%]+", "", s)
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) > 1 and len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:]):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if len(parts) > 1 and len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:]):
+            s = s.replace(".", "")
+    return Decimal(s) * (-1 if neg else 1)
+
+
 # ---------------- data_analysis ----------------
 
 def data_discount(rnd, i, out):
-    """Price as a quoted "$1,204.50"; discount in percent, blank means none."""
+    """Prices in one of several money formats; discount in percent, blank = none."""
     rows = []
+    style = rnd.choice(_PRICE_STYLES)
+    disc_pct = rnd.random() < 0.5  # discount cell as '20%' vs plain 20
     for k in range(rnd.randint(22, 34)):
         price = Decimal(rnd.randint(800, 2400)) + Decimal(rnd.choice(["0.50", "0.25", "0"]))
         disc = rnd.choice([0, 0, 5, 10, 15, 20])
+        if disc == 0:
+            dcell = ""
+        elif disc_pct:
+            dcell = f"{disc}%"
+        else:
+            dcell = disc
         rows.append({
             "order_id": k + 1,
             "region": rnd.choice(REGIONS),
             "product": rnd.choice(PRODUCTS),
             "units": rnd.randint(1, 9),
-            "price": "$" + f"{price:,.2f}",
-            "discount": "" if disc == 0 else disc,
+            "price": _fmt_price(price, style),
+            "discount": dcell,
         })
     name = f"shadow_data_discount_{i:03d}"
     d = _write(out, name, "data_analysis", "", "0")
@@ -97,12 +162,16 @@ def data_discount(rnd, i, out):
     for r in rows:
         if r["region"] != region:
             continue
-        disc = Decimal(str(r["discount"] or 0)) / Decimal(100)
-        total += _parse_money(r["price"]) * r["units"] * (Decimal(1) - disc)
+        units = Decimal(str(r["units"]))
+        price = _parse_money_any(r["price"])
+        dcell = str(r["discount"]).replace("%", "").strip()
+        disc = Decimal(dcell) if dcell else Decimal(0)
+        total += price * units * (Decimal(1) - disc / 100)
     q = (f"The file sales.csv has columns order_id,region,product,units,price,discount "
-         f"({len(rows)} rows). Prices are written like \"$1,204.50\"; discount is a percent "
-         f"and may be empty. What is the total revenue in region '{region}', where revenue "
-         f"is units * price with the discount applied? Round to 2 decimals.")
+         f"({len(rows)} rows). Prices are written like \"{_fmt_price(Decimal('1204.50'), style)}\"; "
+         f"discount is a percent and may be empty. What is the total revenue in region "
+         f"'{region}', where revenue is units * price with the discount applied? "
+         f"Round to 2 decimals.")
     return _rewrite(d, name, "data_analysis", q + BASH + TAIL, _money(total))
 
 
@@ -579,8 +648,11 @@ def bad_network(rnd, i, out):
     return _rewrite(d, name, "math", q + BASH + TAIL, None)
 
 
-def bad_impossible_tests(rnd, i, out):
-    name = f"shadow_bad_tests_{i:03d}"
+def code_missing_function(rnd, i, out):
+    """Tests call `mylib.solve_all` — a name the module never had. The contract
+    forbids editing the tests but not adding code to the module, so the task is
+    feasible: implement the function to satisfy the tests (LLM fallback)."""
+    name = f"shadow_code_missing_{i:03d}"
     src = ("def add(a, b):\n    return a + b\n")
     test = ("import unittest\nimport mylib\n\n\nclass T(unittest.TestCase):\n"
             "    def test_add(self):\n        self.assertEqual(mylib.add(1, 2), 3)\n"
@@ -631,9 +703,10 @@ DATA = [data_discount, data_months, data_threshold, data_percent_tie,
         data_median_even, data_tiebreak, data_whitespace]
 MATH = [math_half, math_csv, math_units, math_percent, math_json]
 SEARCH = [search_reverse, search_chain, search_space, search_multi3]
-CODE = [code_palindrome, code_dedupe, code_rotate, code_rle, code_clamp, code_multi]
+CODE = [code_palindrome, code_dedupe, code_rotate, code_rle, code_clamp, code_multi,
+        code_missing_function]
 BAD = [bad_missing_column, bad_empty, bad_rowcount, bad_missing_file, bad_network,
-       bad_impossible_tests, bad_tie_no_rule, bad_logic,
+       bad_tie_no_rule, bad_logic,
        search_ambiguous, search_missing]
 
 

@@ -612,6 +612,99 @@ class SearchNormalization(unittest.TestCase):
         self.assertEqual(search_solver.solve("Who is the employer of John Smith?", self.d), UNSOLVABLE)
 
 
+class SearchReverse(unittest.TestCase):
+    """Reverse lookup: the start entity is described by a field value, not named."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="kb_rev_")
+        self.kb = os.path.join(self.d, "kb")
+        os.makedirs(self.kb)
+        self.card("p1.md", "# Jonas Reed\nEmployer: Northwind Traders\nBorn: 1988, Lyon\n")
+        self.card("p2.md", "# Kira Petrov\nEmployer: Solstice Foods\nBorn: 1971, Oslo\n")
+        self.card("c1.md", "# Northwind Traders\nHeadquarters: Rotterdam\nFounded: 2001\n")
+        self.card("c2.md", "# Solstice Foods\nHeadquarters: Oslo\nFounded: 1998\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def card(self, fn, text):
+        with open(os.path.join(self.kb, fn), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_reverse_one_hop(self):
+        q = ("The directory kb/ contains a small knowledge base of markdown files. "
+             "Which company employs the person who was born in Lyon? "
+             "Answer with the company name.")
+        self.assertEqual(search_solver.solve(q, self.d), "Northwind Traders")
+
+    def test_reverse_missing_entity_is_infeasible(self):
+        q = ("The directory kb/ contains a small knowledge base of markdown files. "
+             "Which company employs the person who was born in Prague?")
+        self.assertEqual(search_solver.solve(q, self.d), UNSOLVABLE)
+
+    def test_reverse_multiple_candidates_no_unique_answer(self):
+        self.card("p3.md", "# Irina Sato\nEmployer: Cobalt Works\nBorn: 1990, Lyon\n")
+        q = ("The directory kb/ contains a small knowledge base of markdown files. "
+             "Which company employs the person who was born in Lyon?")
+        self.assertIsNone(search_solver.solve(q, self.d))
+
+
+class MoneyFormats(unittest.TestCase):
+    """The numeric detector: currencies, EU/CH grouping, accounting negatives, percents."""
+
+    def test_dec_formats(self):
+        cases = {
+            "$1,204.50": "1204.50", "€1.204,50": "1204.50", "1 204,50": "1204.50",
+            "1'204.50": "1204.50", "1204.50 USD": "1204.50", "₽1204,50": "1204.50",
+            "USD 1 204.50": "1204.50", "(1,204.50)": "-1204.50", "-1,204.50": "-1204.50",
+            "20%": "20", "1,204": "1204", "1204.505": "1204.505", "1.204": "1204",
+            "": None, "abc": None, "1 204 50": None,
+        }
+        for raw, want in cases.items():
+            got = data_solver._dec(raw)
+            self.assertEqual(str(got) if got is not None else None, want, raw)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="money_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, price, disc, region, extra=""):
+        import csv as csvmod
+        with open(os.path.join(self.d, "sales.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csvmod.writer(f)
+            w.writerow(["order_id", "region", "product", "units", "price", "discount"])
+            w.writerow([1, "north", "widget", 2, price, disc])
+            w.writerow([2, region, "widget", 3, price, disc])
+            w.writerow([3, "south", "gadget", 9, "10", ""])
+        q = (f"The file sales.csv has columns order_id,region,product,units,price,discount (3 rows). "
+             f"Prices are written like \"{price}\"; discount is a percent and may be empty{extra}. "
+             f"What is the total revenue in region '{region}', where revenue is units * price "
+             f"with the discount applied? Round to 2 decimals.")
+        return data_solver.solve(q, self.d)
+
+    def test_usd_with_discount(self):
+        # (2 + 3) * 1204.50 * 0.9 = 5420.25
+        self.assertEqual(self._run("$1,204.50", "10", "north"), "5420.25")
+
+    def test_eu_space_with_pct_discount(self):
+        # (2 + 3) * 1204.50 * 0.85 = 5119.125 -> half-up 5119.13
+        self.assertEqual(self._run("1 204,50", "15%", "north"), "5119.13")
+
+    def test_no_discount_word_means_plain_revenue(self):
+        import csv as csvmod
+        with open(os.path.join(self.d, "sales.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csvmod.writer(f)
+            w.writerow(["order_id", "region", "product", "units", "price", "discount"])
+            w.writerow([1, "north", "widget", 2, "$1,204.50", ""])
+            w.writerow([2, "south", "gadget", 1, "10", ""])
+            w.writerow([3, "south", "gadget", 1, "10", ""])
+        q = ("The file sales.csv has columns order_id,region,product,units,price,discount (3 rows). "
+             "What is the total revenue in region 'north'? Round to 2 decimals.")
+        self.assertEqual(data_solver.solve(q, self.d), "2409.00")
+
+
 class CodeBodyReplacement(unittest.TestCase):
     """Defects outside the single-mutation grammar are repaired from known bodies."""
 
@@ -644,6 +737,21 @@ class CodeBodyReplacement(unittest.TestCase):
                                    "Write only PASS to answer.txt.", self.d)
         self.assertEqual(marker, "PASS")
         self.assertEqual(self.run_tests().returncode, 0)
+
+    def test_missing_function_is_not_declared_infeasible(self):
+        """Tests call a name the module never had: adding code is allowed, so
+        this must go to the LLM fallback (None), never to UNSOLVABLE."""
+        src = "def add(a, b):\n    return a + b\n"
+        test = ("import unittest\nimport mylib\n\n\nclass T(unittest.TestCase):\n"
+                "    def test_add(self):\n        self.assertEqual(mylib.add(1, 2), 3)\n"
+                "    def test_missing(self):\n        self.assertEqual(mylib.solve_all([1, 2]), 3)\n\n\n"
+                "if __name__ == '__main__':\n    unittest.main()\n")
+        self.write(src, test)
+        marker = code_solver.solve("Run `python3 test_mylib.py`; some tests fail. Fix the bugs in "
+                                   "mylib.py (do not edit the tests) until all tests pass. Write "
+                                   "only DONE to answer.txt.", self.d)
+        self.assertIsNone(marker)
+        self.assertNotEqual(self.run_tests().returncode, 0)  # the module must stay untouched
 
     def test_missing_reset_is_fixed(self):
         src = ("def encode(text):\n"

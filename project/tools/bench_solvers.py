@@ -36,11 +36,14 @@ def meta_of(task):
 
 
 def correct(meta, answer):
-    """Same convention as tools/model_matrix.is_correct: a coding answer is the marker."""
+    """Same convention as tools/model_matrix.is_correct: a coding answer is the
+    task's requested marker (DONE by default), never a hardcoded literal."""
     got = str(answer or "").strip()
     expected = str(meta.get("expected") or "").strip()
     if meta.get("check") == "unittest" or expected == "tests_pass":
-        return got.upper() in ("DONE", "PASS")
+        from harness.storage import answer_marker
+        want = {m.upper() for m in ("DONE", expected, answer_marker(meta.get("instruction", ""))) if m}
+        return got.upper() in want
     return got == expected
 
 

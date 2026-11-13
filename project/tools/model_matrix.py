@@ -140,7 +140,11 @@ def is_correct(meta, answer):
         except (TypeError, ValueError):
             return answer == expected
     if check == "unittest" or expected == "tests_pass":
-        return answer.upper() == "DONE"
+        # the task may request any marker ("PASS", "DONE", ...): honour it like
+        # harness/storage.answer_marker does, instead of hardcoding DONE
+        from harness.storage import answer_marker
+        want = {m.upper() for m in ("DONE", expected, answer_marker(meta.get("instruction", ""))) if m}
+        return answer.upper() in want
     return answer == expected
 
 

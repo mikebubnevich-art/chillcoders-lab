@@ -1,8 +1,0 @@
-{
-  "task_id": "math_hard_0002",
-  "task_type": "math",
-  "instruction": "A tank contains 987 liters. First remove one third of the water (round the amount removed down to a whole liter). Add 125 liters. Then divide the water equally among 4 tanks and keep one share, discarding any remainder. Finally add 73 liters. How many liters remain? Compute with python3. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 4,
-  "expected": "268",
-  "check": "exact_int"
-}

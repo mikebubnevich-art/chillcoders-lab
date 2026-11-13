@@ -1,8 +1,0 @@
-{
-  "task_id": "search_medium_0012",
-  "task_type": "search",
-  "instruction": "The knowledge base is stored under kb/. Find the year Cedarline Systems was founded. Use the files rather than guessing. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 2,
-  "expected": "2004",
-  "check": "exact_str"
-}

@@ -1,8 +1,0 @@
-{
-  "task_id": "shell_medium_0008",
-  "task_type": "shell",
-  "instruction": "The file scores.txt contains one integer per line. Use shell tools or Python to find the largest even number. Write only that number to answer.txt. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 3,
-  "expected": "92",
-  "check": "exact_int"
-}

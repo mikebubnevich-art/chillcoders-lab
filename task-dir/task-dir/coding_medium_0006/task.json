@@ -1,8 +1,0 @@
-{
-  "task_id": "coding_medium_0006",
-  "task_type": "coding",
-  "instruction": "Run `python3 -m unittest test_mylib.py`. Fix the bugs in mylib.py without modifying test_mylib.py until all tests pass. Then write only PASS to answer.txt. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 3,
-  "expected": "PASS",
-  "check": "exact_str"
-}

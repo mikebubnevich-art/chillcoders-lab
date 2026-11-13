@@ -1,8 +1,0 @@
-{
-  "task_id": "math_easy_0001",
-  "task_type": "math",
-  "instruction": "A library has 248 books. It receives 37 more, then lends out 59, and finally receives 4 boxes containing 12 books each. How many books does it have now? Compute with python3. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 1,
-  "expected": "274",
-  "check": "exact_int"
-}

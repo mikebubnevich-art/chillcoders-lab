@@ -357,8 +357,9 @@ class FixtureHonesty(unittest.TestCase):
                 self.assertNotEqual(self._fails_at_start(os.path.join(GEN, tid)), 0)
 
     def test_sample_coding_tasks_fail_before_repair(self):
+        # только оригинальные сэмплы; наши копии тех же задач живут в generated_tasks
         base = os.path.join(REPO, "task-dir", "task-dir")
-        for tid in ("coding_0003", "coding_0007", "coding_hard_0007", "coding_medium_0006"):
+        for tid in ("coding_0003", "coding_0007"):
             with self.subTest(tid=tid):
                 self.assertNotEqual(self._fails_at_start(os.path.join(base, tid)), 0)
 

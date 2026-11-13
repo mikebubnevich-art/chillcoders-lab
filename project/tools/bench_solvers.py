@@ -12,7 +12,9 @@ import argparse
 import collections
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,21 +45,29 @@ def correct(meta, answer):
 
 
 def run(tasks_dir):
-    tasks = load_tasks(tasks_dir)
-    rows = []
-    t0 = time.time()
-    for t in tasks:
-        meta = meta_of(t)
-        exp = meta.get("expected")
-        exp = None if exp is None else str(exp)
-        try:
-            r = triage(t)
-            status, answer = r.status, r.answer
-        except Exception as e:  # never let one bad task stop the benchmark
-            status, answer = "error", f"{type(e).__name__}: {e}"
-        rows.append({"id": t["id"], "type": t["type"], "expected": exp,
-                     "status": status, "answer": answer, "ok": correct(meta, answer)})
-    return rows, time.time() - t0
+    # code_solver (dry_run=False) writes the repaired module back into the task
+    # dir. The originals (task-dir/) must stay untouched, so the benchmark runs
+    # on a throwaway copy — like the hidden set will be mounted fresh anyway.
+    work = os.path.join(tempfile.mkdtemp(prefix="bench_"), "tasks")
+    shutil.copytree(tasks_dir, work, ignore=shutil.ignore_patterns("__pycache__"))
+    try:
+        tasks = load_tasks(work)
+        rows = []
+        t0 = time.time()
+        for t in tasks:
+            meta = meta_of(t)
+            exp = meta.get("expected")
+            exp = None if exp is None else str(exp)
+            try:
+                r = triage(t)
+                status, answer = r.status, r.answer
+            except Exception as e:  # never let one bad task stop the benchmark
+                status, answer = "error", f"{type(e).__name__}: {e}"
+            rows.append({"id": t["id"], "type": t["type"], "expected": exp,
+                         "status": status, "answer": answer, "ok": correct(meta, answer)})
+        return rows, time.time() - t0
+    finally:
+        shutil.rmtree(os.path.dirname(work), ignore_errors=True)
 
 
 def summarize(rows):

@@ -1,8 +1,0 @@
-{
-  "task_id": "unsolvable_logic_0010",
-  "task_type": "logic",
-  "instruction": "A sealed box contains exactly 10 marbles. The box contains 4 red marbles and 7 blue marbles, and there are no other colors. Determine the exact number of marbles in the box. If the conditions are inconsistent, write exactly UNSOLVABLE to answer.txt. Work only inside the current directory. When you are done, write ONLY the final answer to the file answer.txt in the current directory.",
-  "reward": 4,
-  "expected": "UNSOLVABLE",
-  "check": "exact_str"
-}

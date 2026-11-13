@@ -1,5 +1,6 @@
 .git
 tests
-tools
+tools/*
+!tools/collect_harness_report.py
 __pycache__
 *.pyc

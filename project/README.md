@@ -15,6 +15,10 @@ attempt; `always`: every coding task goes straight to `MODEL_CODING`),
 `SANDBOX_MAX_MB` (256), `SANDBOX_MEM_MB` (4096), `SANDBOX_FSIZE_MB` (32), `DISABLE_DSL=1`,
 `DISABLE_PATCH=1`, `DISABLE_SOLVERS=1`, `USE_OJIWEN=0` (force the stdlib transport).
 
+The registry report utility can be run separately from the image:
+`docker run --rm --entrypoint python hack:latest /app/tools/collect_harness_report.py`.
+It prints the compact report and its SHA-256 digest on separate lines.
+
 Recommended competition config is **hybrid**: `qwen3.8-27b-noreason` for everything, with
 `qwen3.8-27b` as a surgical retry for coding tasks that the base model failed. The rules allow switching
 models on any call. `CODING_STRATEGY=always` sends every coding task to the strong model instead;

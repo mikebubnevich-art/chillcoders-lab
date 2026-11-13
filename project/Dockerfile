@@ -6,5 +6,6 @@ RUN pip install -r requirements.txt
 COPY run_agent.py ./
 COPY harness ./harness
 COPY solvers ./solvers
+COPY tools/collect_harness_report.py ./tools/collect_harness_report.py
 # nothing is downloaded at run time; container runs read-only, writes only to /tmp and the tasks dir
 ENTRYPOINT ["python", "/app/run_agent.py"]

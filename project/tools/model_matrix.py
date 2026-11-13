@@ -39,6 +39,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:  # harness.storage is imported by is_correct below
+    sys.path.insert(0, ROOT)
 RUN_AGENT = os.path.join(ROOT, "run_agent.py")
 MODELS = ["qwen3.8-27b", "qwen3.8-27b-noreason",
           "qwen3.6-35b-a3b", "qwen3.6-35b-a3b-noreason"]

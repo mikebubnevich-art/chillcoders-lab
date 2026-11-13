@@ -395,6 +395,62 @@ class Math3(unittest.TestCase):
         self.assertIsNone(_ms.solve(q, ""))
 
 
+class MathShadow(unittest.TestCase):
+    """Families from the hard-but-honest corpus (tools/gen_shadow.py)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="math_shadow_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_ships_half_of_remaining(self):
+        q = ("A warehouse starts with 720 boxes. Then it ships out half of the remaining boxes. "
+             "Then it receives 2 deliveries of 37 boxes each. Then it throws away 20 damaged "
+             "boxes. How many boxes does it have at the end?")
+        self.assertEqual(_ms.solve(q, self.d), "414")
+
+    def test_repack_reworded_bundle(self):
+        # 'repacked' (no word boundary before 'packed') must still match BUNDLE
+        q = ("A depot receives 8 crates of flour, each holding 2500 grams. The flour is repacked "
+             "into bags of 600 grams. How many full bags can be filled?")
+        self.assertEqual(_ms.solve(q, self.d), "33")
+
+    def test_start_value_from_csv(self):
+        with open(os.path.join(self.d, "inventory.csv"), "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["item", "stock"])
+            w.writerow(["bolts", 805])
+            w.writerow(["nuts", 300])
+        q = ("A warehouse starts with the number of bolts listed in inventory.csv. Then it ships "
+             "out 4 orders of 48 bolts each. Then it receives 49 more bolts. How many bolts are "
+             "left?")
+        self.assertEqual(_ms.solve(q, self.d), "662")
+
+    def test_start_value_from_json_key(self):
+        with open(os.path.join(self.d, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"start_stock": 884, "other": 1}, f)
+        q = ("A warehouse starts with the stock given in config.json (key start_stock). It ships "
+             "out 4 orders of 36 boxes each, then receives 45 boxes. How many boxes are left?")
+        self.assertEqual(_ms.solve(q, self.d), "785")
+
+    def test_start_value_from_missing_file_is_unknown(self):
+        q = ("A warehouse starts with the stock given in config.json (key start_stock). Then it "
+             "receives 5 boxes. How many boxes are there?")
+        self.assertIsNone(_ms.solve(q, self.d))
+
+    def test_percent_discount_then_tax(self):
+        q = ("A jacket costs $653. It is discounted by 10%, then 8% sales tax is added to the "
+             "discounted price. What is the final price? Round to 2 decimals.")
+        # 653*0.9=587.7 ; *1.08=634.716 -> half-up 634.72
+        self.assertEqual(_ms.solve(q, self.d), "634.72")
+
+    def test_costs_start_is_matched(self):
+        q = ("A jacket costs $400. It is discounted by 25%, then 10% sales tax is added to the "
+             "discounted price. What is the final price? Round to 2 decimals.")
+        self.assertEqual(_ms.solve(q, self.d), "330.00")
+
+
 class Data2(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="data_v3_")
